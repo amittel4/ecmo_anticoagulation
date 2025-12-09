@@ -1429,15 +1429,20 @@ patient_model_data <- patient_level_complications %>%
 
 fibrinogen only measured in 38 patients in this model
 
-    nearest_bilirubin, international_normalization_ratio, weight, hours_ecmo
-    
 ```{r}
 hemorrhage_patient_glm <- glm(
   hemorrhage_any ~ discord_group,
   data = patient_model_data,
   family = binomial)
 
-hemorrhage_patient_glm %>% broom::tidy()
+hemorrhage_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+
+hemorrhage_multivariable_patient_glm <-glm(
+  hemorrhage_any ~ discord_group + international_normalization_ratio + nearest_bilirubin + heparin_infusion_dose_value_units_kg_hr,
+  data = patient_model_data,
+  family = binomial)
+
+hemorrhage_multivariable_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
 
 thrombosis_patient_glm <- glm(
   thrombosis_any ~ discord_group,
@@ -1445,6 +1450,13 @@ thrombosis_patient_glm <- glm(
   family = binomial)
 
 thrombosis_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+
+thrombosis_multivariable_patient_glm <-glm(
+  thrombosis_any ~ discord_group + international_normalization_ratio + nearest_bilirubin + heparin_infusion_dose_value_units_kg_hr,
+  data = patient_model_data,
+  family = binomial)
+
+thrombosis_multivariable_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
 ```
 
 ```{r}
@@ -1455,15 +1467,6 @@ hemorrhage_group_sick %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
 thrombosis_group_sick = glm(thrombosis_any ~ discord_group + pump_flow24 + heparin_infusion_dose_value_units_kg_hr, data = patient_model_data, family = binomial)
 
 thrombosis_group_sick %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
-```
-
-***review***
-```{r}
-discord_grp_glm = glm(discord_group ~ international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr + hours_ecmo, data = patient_model_data, family = binomial)
-
-discord_grp_glm
-
-discord_grp_glm %>% broom::tidy()
 ```
 
 # 1. unadjusted analysis - will not report
