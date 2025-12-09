@@ -1,0 +1,76 @@
+---
+title: "anticoagulation_modeling_2024"
+author: "Aaron Mittel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lme4)
+library(ggeffects)
+library(merTools)
+```
+
+# Polynomial Fit
+```{r}
+# Fit mixed-effects model with random intercept for patient (mrn)
+discordance_model <- lmer(
+  heparin_assay_quantitative ~ poly(activated_partial_thromboplastin_time, 2) + (1 | mrn),
+  data = discordance_data)
+
+# Create prediction grid over the range of your predictor
+new_data <- data.frame(
+  activated_partial_thromboplastin_time = seq(
+    min(discordance_data$activated_partial_thromboplastin_time, na.rm = TRUE),
+    max(discordance_data$activated_partial_thromboplastin_time, na.rm = TRUE),
+    length.out = 300  ),
+  mrn = discordance_data$mrn[1]  # Assign any existing patient ID for prediction
+)
+
+pred_interval <- predictInterval(
+  discordance_model,          # model as first argument, no name
+  newdata = new_data,
+  level = 0.99,
+  n.sims = 1000,
+  which = "fixed",
+  include.resid.var = TRUE)
+
+# Bind predictions to the new_data
+new_data <- bind_cols(new_data, pred_interval)
+
+# Flag unusual data points outside prediction intervals
+discordance_data <- discordance_data %>%
+  rowwise() %>%
+  mutate(
+    # Find closest prediction row by activated_partial_thromboplastin_time
+    pred_row = list(new_data[which.min(abs(activated_partial_thromboplastin_time - new_data$activated_partial_thromboplastin_time)), ]),
+    predicted = pred_row$fit,
+    lower = pred_row$lwr,
+    upper = pred_row$upr,
+    unusual = heparin_assay_quantitative < lower | heparin_assay_quantitative > upper
+  ) %>%
+  ungroup()
+
+# Plot predictions with prediction intervals and flagged unusual points
+ggplot() +
+  geom_ribbon(data = new_data,
+              aes(x = activated_partial_thromboplastin_time, ymin = lwr, ymax = upr),
+              fill = "blue", alpha = 0.2) +
+  geom_line(data = new_data,
+            aes(x = activated_partial_thromboplastin_time, y = fit),
+            color = "blue") +
+  geom_point(data = discordance_data,
+             aes(x = activated_partial_thromboplastin_time, y = heparin_assay_quantitative, color = unusual)) +
+  scale_color_manual(values = c("black", "red")) +
+  labs(
+    color = "Unusual",
+    title = "Mixed Model Fit with 99% Prediction Interval",
+    x = "Activated Partial Thromboplastin Time",
+    y = "Heparin Assay Quantitative"
+  ) +
+  theme_minimal()
+```
+

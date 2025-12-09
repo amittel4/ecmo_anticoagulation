@@ -1,0 +1,689 @@
+---
+title: "unused_anticoagulation_code"
+author: "Aaron Mittel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# This code was used to identify concordance vs discordance based on ranges of assay values, rather than based on fitting a model between labs. Important to not classify disordance based on absolute cutoffs as both assays can be imprecise (i.e. might get a different value if retested the same sample) and many patients might be labeled as discordant/concordant even if the lab value is VERY close (e.g. off by 1 aPTT second). This is not a real reflection of discordance. Instead, better to classify patients based on how like aPTT and anti-Xa are wihtin our sample - identifying those that are not within acceptable bounds of a predicted interval of a regression model.
+
+# Discordance Data, Heparin exposed - DO NOT NEED
+```{r set up data for discordance between low vs classic goal analysis, include = FALSE, echo = FALSE}
+discordance_data = 
+  run_labs_complications_raw %>% unnest(data) %>% ungroup() %>%
+  pivot_longer(
+    bilirubin_indirect:plasma_free_hemoglobin,
+    names_to = "lab",
+    values_to = "value") %>% 
+  filter(!is.na(value)) %>% 
+  filter(lab %in% c("heparin_assay_quantitative", "activated_partial_thromboplastin_time")) %>%
+  filter(!is.na(heparin_infusion_dose_value_units_kg_hr)) %>% 
+  pivot_longer(
+    concordance_classic:concordance_low,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance_category") %>% 
+  mutate(
+    hypothetical_treatment = as.factor(hypothetical_treatment),
+    concordance_category = as.factor(concordance_category)) %>% 
+  pivot_wider(
+    names_from = lab,
+    values_from = value) %>% 
+  mutate(
+    hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"))
+
+discordance_data
+
+concordance_df = 
+  discordance_data %>% 
+  group_by(hypothetical_treatment, concordance_category) %>% 
+  count() %>% 
+  drop_na() %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = n)
+
+concordance_df
+
+simple_concordance_df = 
+  discordance_data %>% 
+  select(-concordance_category, -hypothetical_treatment) %>% 
+  pivot_longer(
+    concordance_classic_simple:concordance_low_simple,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance") %>% 
+  mutate(
+    hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "_simple")) %>% 
+  group_by(hypothetical_treatment, concordance) %>% 
+  count() %>% 
+  drop_na() %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = n)
+
+simple_concordance_df
+
+# nesting data
+discordance_nest = 
+  discordance_data %>%
+  ungroup() %>% 
+  group_by(concordance_category) %>% nest() %>% drop_na()
+
+discordance_nest
+
+simple_discordance_nest = 
+  discordance_data %>% 
+  select(-concordance_category, -hypothetical_treatment) %>% 
+  pivot_longer(
+    concordance_classic_simple:concordance_low_simple,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance") %>% 
+  mutate(
+    hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "_simple")) %>% 
+  ungroup() %>% 
+  group_by(concordance) %>% nest() %>% drop_na()
+
+simple_discordance_nest
+
+# chi square goodness of fit test function and mapping it to the nested data
+group_chisq <- function(x) {
+  observed <- table(x$hypothetical_treatment)
+  counts_df <- as.data.frame(observed)
+
+  if (length(observed) == 1) {
+    return(
+      tibble(
+        statistic = NA_real_,
+        p.value = NA_real_,
+        parameter = NA_real_,
+        method = "Only one group present",
+        data.name = NA_character_
+      ) %>% 
+      mutate(counts = list(counts_df))
+    )
+  }
+
+  # Run test and combine with counts
+  broom::tidy(chisq.test(x = observed, p = rep(1/length(observed), length(observed)))) %>%
+    mutate(counts = list(counts_df))
+}
+```
+
+```{r, include = TRUE, echo = FALSE}
+discordance_nest %>% 
+  mutate(
+    results = map(data, group_chisq)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  group_by(concordance_category) %>% 
+  pivot_wider(
+    names_from = Var1,
+    values_from = Freq) %>% 
+  select(concordance_category, classic, low, statistic, p.value, method) %>% 
+  kable(digits = 3)
+
+simple_discordance_nest %>% 
+  mutate(
+    results = map(data, group_chisq)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  group_by(concordance) %>% 
+  pivot_wider(
+    names_from = Var1,
+    values_from = Freq) %>% 
+  select(concordance, classic, low, statistic, p.value, method) %>% 
+  kable(digits = 3, caption = "count and chi-square count data hypothesis testing for concordant LABS")
+```
+
+```{r visualizing volume of labs, include = TRUE, echo = FALSE}
+# count and list of distinct MRNs among patients receiving heparin
+discordance_data %>% 
+  distinct(mrn) %>% count() %>% kable(caption = "count of distinct MRNs receiving heparin with time-matched aPTT and anti-Xa")
+
+# counts of MRNs by location (ICU = department_name)
+# counts between distinct MRNs and department_name may not match as some patients move between departments (keep same MRN)
+discordance_data %>% 
+  distinct(mrn, department_name) %>% count(department_name) %>% arrange(desc(n)) %>% kable(caption = "counts of MRNs by location; counts between distinct MRNs and department_name may not match as some patients move between departments")
+
+# counts of labs done in each location
+discordance_data %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = concordance_category) %>% 
+  group_by(department_name) %>% count() %>% arrange(desc(n)) %>% kable(caption = "counts of labs in each location")
+
+# plotting counts of labs
+discordance_data %>% 
+  pivot_longer(activated_partial_thromboplastin_time:heparin_assay_quantitative,
+               names_to = "lab",
+               values_to = "value") %>% 
+  filter(hypothetical_treatment == "classic") %>% 
+  mutate(
+    department_name = fct_infreq(department_name)) %>%
+  ggplot(aes(x = department_name, fill = lab)) + geom_bar(position = "dodge") + geom_text(stat = "count", aes(label = after_stat(count)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) + theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 0.5))
+```
+
+# scatterplot of low anticoagulation lab targets
+discordance_data %>%
+  group_by(mrn, patient_name, lab_result_time) %>% 
+  filter(hypothetical_treatment == "low") %>% 
+  ggplot(aes(x = activated_partial_thromboplastin_time, y = heparin_assay_quantitative, color = concordance_category)) + geom_point() + scale_color_manual(values = c("concordant low" = "lightgrey", "concordant" = "lightgrey", "concordant high" = "lightgrey", "low aPTT" = "red", "low antiXa" = "blue", "high aPTT" = "orange", "high aPTT low antiXa" = "yellow", "high antiXa" = "green")) + annotate("text", x = 125, y = 0.80, label = paste("r =", round(correlation_ptt_xa, 2))) + coord_cartesian(xlim = c(20, 150), ylim = c(0, 1.0)) + theme_minimal()
+
+# scatterplot of low anticoagulation lab targets, faceted by ICU (limited to MICU A, CCU, HRT CCU, or CTICU)
+discordance_data %>%
+  group_by(mrn, patient_name, lab_result_time) %>% 
+  filter(hypothetical_treatment == "low") %>% 
+  filter(department_name == "MIL 5 CTICU" | department_name == "MIL 5 CCU" | department_name == "HRT CARDIAC CARE" | department_name == "MIL 4 MICU A") %>% 
+  ggplot(aes(x = activated_partial_thromboplastin_time, y = heparin_assay_quantitative, color = concordance_category)) + geom_point() + facet_wrap(~ department_name) + scale_color_manual(values = c("concordant low" = "lightgrey", "concordant" = "lightgrey", "concordant high" = "lightgrey", "low aPTT" = "red", "low antiXa" = "blue", "high aPTT" = "orange", "high aPTT low antiXa" = "yellow", "high antiXa" = "green")) + coord_cartesian(xlim = c(20, 150), ylim = c(0, 1.0)) + theme_minimal()
+
+# scatterplot of classic anticoagulation lab targets, simple grouping for abstract
+discordance_data %>%
+  group_by(mrn, patient_name, lab_result_time) %>% 
+  filter(hypothetical_treatment == "classic") %>% 
+  rename(
+    Concordance = concordance_classic_simple,
+    aPTT = activated_partial_thromboplastin_time,
+    antiXa = heparin_assay_quantitative) %>% 
+  ggplot(aes(x = aPTT, y = antiXa, color = Concordance)) + geom_point() + scale_color_manual(values = c("concordant" = "lightgrey", "discordant aPTT below antiXa" = "red", "discordant aPTT above antiXa" = "blue")) + annotate("text", x = 125, y = 0.80, label = paste("r =", round(correlation_ptt_xa, 2))) + coord_cartesian(xlim = c(20, 150), ylim = c(0, 1.0)) + theme_minimal()
+
+# scatterplot of classic anticoagulation lab targets, faceted by ICU (limited to MICU A, CCU, HRT CCU, or CTICU)
+discordance_data %>%
+ group_by(mrn, patient_name, lab_result_time) %>% 
+  filter(hypothetical_treatment == "classic") %>% 
+  filter(department_name == "MIL 5 CTICU" | department_name == "MIL 5 CCU" | department_name == "HRT CARDIAC CARE" | department_name == "MIL 4 MICU A") %>% 
+  ggplot(aes(x = activated_partial_thromboplastin_time, y = heparin_assay_quantitative, color = concordance_category)) + geom_point() + facet_wrap(~ department_name) + scale_color_manual(values = c("concordant low" = "lightgrey", "concordant" = "lightgrey", "concordant high" = "lightgrey", "low aPTT" = "red", "low antiXa" = "blue", "high aPTT" = "orange", "high aPTT low antiXa" = "yellow", "high antiXa" = "green")) + coord_cartesian(xlim = c(20, 150), ylim = c(0, 1.0)) + theme_minimal()
+  
+  
+**need to redo all analyses, starting with run_labs_complications_raw, checking to ensure counts are correct, now that dataframe includes true ECMO stop times and additional complications**
+
+# Discordance and Complications, Heparin Exposed
+```{r set up of complication data, echo = FALSE, include = FALSE}
+discordance_complications_df =
+  run_labs_complications_raw %>% 
+  group_by(study_id, mrn, patient_name) %>% 
+  unnest(data) %>% 
+  pivot_longer(
+    bilirubin_indirect:plasma_free_hemoglobin,
+    names_to = "lab",
+    values_to = "value") %>% 
+  filter(!is.na(value)) %>% 
+  #including only patients on heparin
+  filter(!is.na(heparin_infusion_dose_value_units_kg_hr)) %>% 
+  # focusing only on simple groupings of concordance
+  select(-concordance_classic, -concordance_low) %>%
+  pivot_longer(
+    concordance_classic_simple:concordance_low_simple,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance_category") %>% 
+  mutate(
+    hypothetical_treatment = as.factor(hypothetical_treatment),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "_simple"),
+    concordance_category = as.factor(concordance_category)) %>% 
+  filter(!is.na(concordance_category)) %>% 
+  group_by(study_id, mrn, patient_name) %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = concordance_category) %>% 
+  pivot_longer(
+    death_date:mechanical_air_in_circuit,
+    names_to = "complication",
+    values_to = "complication_time") %>% 
+  # filtering to include only complications that occurred after the particular lab was drawn, retaining NA complication_time as those mean complications did not occur
+  filter(
+    is.na(complication_time) | complication_time > lab_result_time)
+    
+discordance_complications_df
+
+discordance_complications_nest_simple = 
+  discordance_complications_df %>% 
+  group_by(study_id, patient_name, mrn) %>% 
+  # note that only simply grouped discordance values are in the above dataframe
+  pivot_longer(
+    classic:low,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance") %>%
+  group_by(hypothetical_treatment, complication) %>% 
+  nest()
+
+discordance_complications_nest_simple
+
+# chi square goodness of fit test function and mapping it to the nested data, allowing for multiple counts per patient (i.e. could be discordant of various types or concordant - due to presence of repeated labs per patient)
+group_chisq_complications <- function(x) {
+  # Create table of unique mrn per concordance category
+  observed <- x %>% 
+    distinct(mrn, concordance) %>% # count each mrn once per concordance
+    count(concordance) %>% 
+    deframe() # named vector: names = concordance, values = counts
+
+  counts_df <- enframe(observed, name = "concordance", value = "n")
+
+  if (length(observed) == 1) {
+    return(
+      tibble(
+        statistic = NA_real_,
+        p.value = NA_real_,
+        parameter = NA_real_,
+        method = "Only one group present",
+        data.name = NA_character_
+      ) %>% 
+      mutate(counts = list(counts_df))
+    )
+  }
+
+  # Run test and return tidy results with counts
+  broom::tidy(chisq.test(x = observed, p = rep(1/length(observed), length(observed)))) %>%
+    mutate(counts = list(counts_df))
+}
+
+# chi square goodness of fit test function and mapping it to the nested data, now each patient can only count once based on presence of concordance in all labs, or a specific type of discordance only, or mixed discordance
+group_chisq_complications_once <- function(x) {
+  mrn_classification <- x %>%
+    distinct(mrn, concordance) %>%
+    group_by(mrn) %>%
+    summarise(
+      classification = {
+        types <- unique(concordance)
+        # Remove concordant to focus on discordance types
+        discord_types <- setdiff(types, "concordant")
+        
+        if (length(discord_types) == 0) {
+          "concordant"
+        } else if (length(discord_types) == 1) {
+          discord_types
+        } else {
+          "mixed"
+        }
+      },
+      .groups = "drop"
+    )
+  
+  # Count how many MRNs per classification
+  observed <- mrn_classification %>%
+    count(classification) %>%
+    deframe()
+  
+  counts_df <- enframe(observed, name = "classification", value = "n")
+  
+  # Handle case of only one group
+  if (length(observed) == 1) {
+    return(
+      tibble(
+        statistic = NA_real_,
+        p.value = NA_real_,
+        parameter = NA_real_,
+        method = "Only one group present",
+        data.name = NA_character_
+      ) %>%
+        mutate(counts = list(counts_df))
+    )
+  }
+  
+  # Run chi-square goodness of fit test vs uniform expectation
+  broom::tidy(
+    chisq.test(x = observed, p = rep(1 / length(observed), length(observed)))
+  ) %>%
+    mutate(counts = list(counts_df))
+}
+```
+
+
+# Demographics
+
+```{r, echo = FALSE, include = TRUE}
+discordance_by_studyid %>% group_by(discordance_group) %>% count() %>% kable()
+
+run_labs_complications_raw %>% unnest(data) %>% 
+  group_by(study_id, mrn, patient_name) %>% 
+  pivot_longer(
+    bilirubin_indirect:plasma_free_hemoglobin,
+    names_to = "lab",
+    values_to = "value") %>% 
+  filter(!is.na(value)) %>% 
+  #including only patients on heparin
+  filter(!is.na(heparin_infusion_dose_value_units_kg_hr)) %>% 
+  # focusing only on simple groupings of concordance
+  select(-concordance_classic, -concordance_low) %>%
+  pivot_longer(
+    concordance_classic_simple:concordance_low_simple,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance_category") %>% 
+  mutate(
+    hypothetical_treatment = as.factor(hypothetical_treatment),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "_simple"),
+    concordance_category = as.factor(concordance_category)) %>% 
+  filter(!is.na(concordance_category)) %>% 
+  group_by(study_id, mrn, patient_name) %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = concordance_category) %>% 
+  pivot_longer(
+    death_date:mechanical_air_in_circuit,
+    names_to = "complication",
+    values_to = "complication_time") %>% 
+  # filtering to include only complications that occurred after the particular lab was drawn, retaining NA complication_time as those mean complications did not occur
+  filter(
+    is.na(complication_time) | complication_time > lab_result_time) %>% 
+  distinct(study_id, discordance_group, age_years, sex, weight, height, hours_ecmo, support_type, mode) %>% 
+  group_by(discordance_group) %>%
+  summarise(
+    n = n(),
+    median_age = median(age_years, na.rm = TRUE),
+    iqr_age = IQR(age_years, na.rm = TRUE),
+    male_pct = mean(sex == "Male", na.rm = TRUE) * 100,
+    median_wt = median(weight, na.rm = TRUE),
+    iqr_wt = IQR(weight, na.rm = TRUE),
+    median_ht = median(height, na.rm = TRUE),
+    iqr_ht = IQR(height, na.rm = TRUE),
+    median_hours = median(hours_ecmo, na.rm = TRUE),
+    iqr_hours = IQR(hours_ecmo, na.rm = TRUE),
+    .groups = "drop") %>% 
+  pivot_longer(n:iqr_hours) %>% 
+  pivot_wider(
+    names_from = discordance_group,
+    values_from = value) %>% 
+  kable(digits = 1, caption = "basic demographics of discordant groups, each mrn with one group only")
+
+run_labs_complications_raw %>% unnest(data) %>% 
+  group_by(study_id, mrn, patient_name) %>% 
+  pivot_longer(
+    bilirubin_indirect:plasma_free_hemoglobin,
+    names_to = "lab",
+    values_to = "value") %>% 
+  filter(!is.na(value)) %>% 
+  #including only patients on heparin
+  filter(!is.na(heparin_infusion_dose_value_units_kg_hr)) %>% 
+  # focusing only on simple groupings of concordance
+  select(-concordance_classic, -concordance_low) %>%
+  pivot_longer(
+    concordance_classic_simple:concordance_low_simple,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance_category") %>% 
+  mutate(
+    hypothetical_treatment = as.factor(hypothetical_treatment),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"),
+    hypothetical_treatment = str_remove(hypothetical_treatment, "_simple"),
+    concordance_category = as.factor(concordance_category)) %>% 
+  filter(!is.na(concordance_category)) %>% 
+  group_by(study_id, mrn, patient_name) %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = concordance_category) %>% 
+  pivot_longer(
+    death_date:mechanical_air_in_circuit,
+    names_to = "complication",
+    values_to = "complication_time") %>% 
+  # filtering to include only complications that occurred after the particular lab was drawn, retaining NA complication_time as those mean complications did not occur
+  filter(
+    is.na(complication_time) | complication_time > lab_result_time) %>% 
+  distinct(study_id, discordance_group, age_years, sex, weight, height, hours_ecmo, support_type, mode) %>% 
+  group_by(discordance_group, support_type) %>%
+  count() %>%
+  group_by(discordance_group) %>%
+  mutate(percent = 100 * n / sum(n)) %>%
+  pivot_wider(
+    names_from = support_type,
+    values_from = percent,
+    names_prefix = "pct_",
+    values_fill = 0) %>% 
+  kable(digits = 1, caption = "counts of support type by discordant groups, each mrn with one group only")
+```
+
+```{r, echo = FALSE, include = FALSE}
+discordance_complications_df %>% 
+  filter(!is.na(complication_time)) %>% 
+  group_by(complication) %>% 
+  distinct(mrn) %>%
+  summarise(n = n()) %>% 
+  arrange(n = desc(n)) %>% 
+  kable(caption = "Count of complications, all patients exposed to heparin")
+
+discordance_complications_df %>% 
+  group_by(study_id, patient_name, mrn) %>% 
+  # note that only simply grouped discordance values are in the above dataframe
+  pivot_longer(
+    classic:low,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance") %>% 
+  group_by(hypothetical_treatment, concordance) %>% 
+  distinct(mrn) %>% 
+  summarise(
+    n = n()) %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = n) %>% 
+  kable(caption = "count of distinct mrns, patients exposed to heparin")
+
+discordance_complications_df %>% 
+  group_by(study_id, patient_name, mrn) %>% 
+  # note that only simply grouped discordance values are in the above dataframe
+  pivot_longer(
+    classic:low,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance") %>% 
+  group_by(hypothetical_treatment, complication) %>% 
+  filter(!is.na(complication_time)) %>% 
+  distinct(mrn) %>% 
+  summarise(
+    n = n()) %>% 
+  pivot_wider(
+    names_from = hypothetical_treatment,
+    values_from = n)
+
+discordance_complications_df %>% 
+  group_by(study_id, patient_name, mrn) %>% 
+  # note that only simply grouped discordance values are in the above dataframe
+  pivot_longer(
+    classic:low,
+    names_to = "hypothetical_treatment",
+    values_to = "concordance") %>% 
+  group_by(complication, concordance) %>% 
+  filter(!is.na(complication_time)) %>% 
+  distinct(mrn) %>% 
+  summarise(
+    n = n()) %>% 
+  pivot_wider(
+    names_from = concordance,
+    values_from = n)
+
+# analysis based on counting each patient in potentially multiple groups (many repeated labs per patient)
+discordance_complications_nest_simple %>% 
+  unnest(data) %>% 
+  filter(!is.na(complication_time)) %>% 
+  group_by(hypothetical_treatment, complication) %>% 
+  nest() %>% 
+  mutate(
+    results = map(data, group_chisq_complications)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  pivot_wider(
+    names_from = concordance,
+    values_from = n)
+```
+
+```{r single counts, echo = FALSE, include = TRUE}
+# analysis based on counting each patient once, such that concordance = all labs concordant, discordance = depends on type of discordance (could be mixed types)
+discordance_complications_nest_simple %>% 
+  unnest(data) %>% 
+  filter(!is.na(complication_time)) %>% 
+  group_by(hypothetical_treatment, complication) %>% 
+  nest() %>% 
+  mutate(
+    results = map(data, group_chisq_complications_once)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  pivot_wider(
+    names_from = classification,
+    values_from = n)
+
+# analysis based on counting each patient once, focused on composite of hemorrhagic + thrombotic complications (mechanical circuit change, hemorrhagic peripheral site bleeding, hemorrhagic GI bleeding, hemorrhagic surgical site bleeding) OR death
+discordance_complications_nest_simple %>% 
+  unnest(data) %>% 
+  filter(!is.na(complication_time)) %>% 
+  filter(complication %in% c("death_date", "mechanical_circuit_change", "hemorrhagic_peripheral_cannulation_site_bleeding", "hemorrhagic_gi_hemorrhage", "hemorrhagic_surgical_site_bleeding")) %>% 
+  mutate(
+    hemorrhage_thrombosis_death = case_when(
+      complication == "mechanical_circuit_change" ~ "hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_peripheral_cannulation_site_bleeding" ~"hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_gi_hemorrhage" ~ "hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_surgical_site_bleeding" ~ "hemorrhage_or_thrombosis",
+      complication == "death_date" ~ "death",
+      TRUE ~ NA_character_)) %>%
+  group_by(hypothetical_treatment, hemorrhage_thrombosis_death) %>% 
+  nest() %>% 
+  mutate(
+    results = map(data, group_chisq_complications_once)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  pivot_wider(
+    names_from = classification,
+    values_from = n) %>% 
+  kable(caption = "analysis based on counting each patient once, focused on composite of hemorrhagic + thrombotic complications (mechanical circuit change, hemorrhagic peripheral site bleeding, hemorrhagic GI bleeding, hemorrhagic surgical site bleeding) OR death")
+
+# analysis based on counting each patient once, focused on composite of hemorrhagic + thrombotic complications (mechanical circuit change, hemorrhagic peripheral site bleeding, hemorrhagic GI bleeding, hemorrhagic surgical site bleeding) OR death AND filtering out patients with hyperbilirubinemia > 2.5 mg/dL (which may increase anti-Xa artifactually)
+discordance_complications_nest_simple %>% 
+  unnest(data) %>% 
+  filter(!is.na(complication_time)) %>% 
+  group_by(study_id, mrn, patient_name, lab_result_time) %>% 
+  filter(!any(lab == "bilirubin_total" & value > 2.5)) %>% # Upper limit of normal for total bilirubin at NYP-Columbia is 1.2 mg/dL. Jaundice threshold is likely 2 - 3 mg/dL
+  ungroup() %>% 
+  filter(complication %in% c("death_date", "mechanical_circuit_change", "hemorrhagic_peripheral_cannulation_site_bleeding", "hemorrhagic_gi_hemorrhage", "hemorrhagic_surgical_site_bleeding")) %>% 
+  mutate(
+    hemorrhage_thrombosis_death = case_when(
+      complication == "mechanical_circuit_change" ~ "hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_peripheral_cannulation_site_bleeding" ~"hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_gi_hemorrhage" ~ "hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_surgical_site_bleeding" ~ "hemorrhage_or_thrombosis",
+      complication == "death_date" ~ "death",
+      TRUE ~ NA_character_)) %>%
+  group_by(hypothetical_treatment, hemorrhage_thrombosis_death) %>% 
+  nest() %>% 
+  mutate(
+    results = map(data, group_chisq_complications_once)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  pivot_wider(
+    names_from = classification,
+    values_from = n) %>% 
+  kable(caption = "analysis based on counting each patient once, focused on composite of hemorrhagic + thrombotic complications (mechanical circuit change, hemorrhagic peripheral site bleeding, hemorrhagic GI bleeding, hemorrhagic surgical site bleeding) OR death AND filtering out patients with hyperbilirubinemia > 2.5 mg/dL (which may increase anti-Xa artifactually")
+
+# analysis based on counting each patient once, focused on composite of hemorrhagic + thrombotic complications (mechanical circuit change, hemorrhagic peripheral site bleeding, hemorrhagic GI bleeding, hemorrhagic surgical site bleeding) OR death with all discordance grouped together
+discordance_complications_nest_simple %>% 
+  unnest(data) %>% 
+  filter(!is.na(complication_time)) %>% 
+  filter(complication %in% c("death_date", "mechanical_circuit_change", "hemorrhagic_peripheral_cannulation_site_bleeding", "hemorrhagic_gi_hemorrhage", "hemorrhagic_surgical_site_bleeding")) %>% 
+  mutate(
+    hemorrhage_thrombosis_death = case_when(
+      complication == "mechanical_circuit_change" ~ "hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_peripheral_cannulation_site_bleeding" ~"hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_gi_hemorrhage" ~ "hemorrhage_or_thrombosis",
+      complication == "hemorrhagic_surgical_site_bleeding" ~ "hemorrhage_or_thrombosis",
+      complication == "death_date" ~ "death",
+      TRUE ~ NA_character_),
+    concordance = case_when(
+      concordance == "concordant" ~ "concordant",
+      concordance == "discordant aPTT below antiXa" ~ "discordant",
+      concordance == "discordant aPTT above antiXa" ~ "discordant",
+      concordance == "high aPTT low antiXa" ~ "discordant",
+      concordance == "low aPTT high antiXa" ~ "discordant",
+      TRUE ~ NA_character_)) %>% 
+  group_by(hypothetical_treatment, hemorrhage_thrombosis_death) %>% 
+  nest()  %>% 
+  mutate(
+    results = map(data, group_chisq_complications_once)) %>% 
+  unnest(results) %>% 
+  unnest(counts) %>% 
+  select(-data, -parameter) %>% 
+  pivot_wider(
+    names_from = classification,
+    values_from = n) %>% 
+  kable(caption = "analysis based on counting each patient once, focused on composite of hemorrhagic + thrombotic complications (mechanical circuit change, hemorrhagic peripheral site bleeding, hemorrhagic GI bleeding, hemorrhagic surgical site bleeding) OR death with all discordance grouped together")
+```
+
+# Polynomial Fitting
+```{r}
+# Fit mixed-effects model with random intercept for patient (mrn)
+discordance_model <- lmer(
+  heparin_assay_quantitative ~ poly(activated_partial_thromboplastin_time, 2) + (1 | mrn),
+  data = discordance_data)
+
+# Create prediction grid over the range of predictor
+new_data <- data.frame(
+  activated_partial_thromboplastin_time = seq(
+    min(discordance_data$activated_partial_thromboplastin_time, na.rm = TRUE),
+    max(discordance_data$activated_partial_thromboplastin_time, na.rm = TRUE),
+    length.out = 300  ),
+  mrn = discordance_data$mrn[1]  # Assign any existing patient ID for prediction
+)
+
+pred_interval <- merTools::predictInterval(
+  discordance_model,          # model as first argument, no name
+  newdata = new_data,
+  level = 0.99,
+  n.sims = 1000,
+  which = "fixed",
+  include.resid.var = TRUE)
+
+# Bind predictions to the new_data
+new_data <- bind_cols(new_data, pred_interval)
+
+# Flag unusual data points outside prediction intervals
+discordance_data =
+  discordance_data %>%
+  rowwise() %>%
+  mutate(
+    # Find closest prediction row by activated_partial_thromboplastin_time
+    pred_row = list(new_data[which.min(abs(activated_partial_thromboplastin_time - new_data$activated_partial_thromboplastin_time)), ]),
+    predicted = pred_row$fit,
+    lower = pred_row$lwr,
+    upper = pred_row$upr,
+    unusual = heparin_assay_quantitative < lower | heparin_assay_quantitative > upper
+  ) %>%
+  ungroup()
+
+# Plot predictions with prediction intervals and flagged unusual points
+ggplot() +
+  geom_ribbon(data = new_data,
+              aes(x = activated_partial_thromboplastin_time, ymin = lwr, ymax = upr),
+              fill = "blue", alpha = 0.2) +
+  geom_line(data = new_data,
+            aes(x = activated_partial_thromboplastin_time, y = fit),
+            color = "blue") +
+  geom_point(data = discordance_data,
+             aes(x = activated_partial_thromboplastin_time, y = heparin_assay_quantitative, color = unusual)) +
+  scale_color_manual(values = c("black", "red")) +
+  labs(
+    color = "Unusual",
+    title = "Mixed Model Fit with 99% Prediction Interval",
+    x = "Activated Partial Thromboplastin Time",
+    y = "Heparin Assay Quantitative"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+discordance_data
+```
+
+Note that patients can count in multiple renal failure categories. I.e. Patient X is included in renal Cr 1.5 - 3.0 AND Cr > 3.0.
+
+**We need thrombotic complications:**
+
+- DVT
+
+**We need additional hemorrhagic complications:**
+
+- RBCs
+
+- FFP
+
+- platelet
+
+**What are the actual ranges of aPTT and anti-Xa among those with completely concordant versus discordant categories? Why are there different death outcomes? Are the demographics different? Disease processes?**
