@@ -37,6 +37,8 @@ _Hypothesis 2_: Discordance between aPTT and anti-Xa indicates the presence of c
 
 * 0.2 - 0.5 vs 45 - 65 (CLASSIC GOAL)
 
+Source: NYP GUIDLINE "UNFRACTIONATED HEPARIN INTRAVENOUS (IV) DOSING AND MONITORING FOR ADULT INPATIENTS RECEIVING EXTRACORPOREAL MEMBRANE OXYGENATION (ECMO)" Approved Dec 2022
+
 ```{r read in and janitoring, include = FALSE}
 # importing lab data
 lab_data = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx") %>% 
@@ -480,10 +482,39 @@ coag_bili_closest =
     nearest_bilirubin = bilirubin_total,
     bilirubin_time = lab_result_time.y)
 
-run_labs_complications_raw = 
+# adding nearest platelet count within 24 hours of aPTT (mirrors nearest_bilirubin)
+platelet_labs = 
   run_labs_complications_raw %>% unnest(data) %>% 
-  left_join(coag_bili_closest, by = c("study_id", "mrn", "lab_result_time")) %>% 
+  filter(!is.na(platelet)) %>%
+  select(study_id, mrn, lab_result_time, platelet)
+
+coag_platelet_matches = fuzzyjoin::fuzzy_left_join(
+  coag_labs,
+  platelet_labs,
+  by = c("study_id" = "study_id", "lab_result_time" = "lab_result_time"),
+  match_fun = list(`==`, function(x, y) abs(difftime(x, y, units = "hours")) <= 24)
+) %>%
+  mutate(time_diff = abs(difftime(lab_result_time.x, lab_result_time.y, units = "secs"))) %>%
+  group_by(study_id.x, mrn.x, lab_result_time.x) %>%
+  slice_min(time_diff, with_ties = FALSE) %>%
+  ungroup()
+
+coag_platelet_closest =
+  coag_platelet_matches %>%
+  select(
+    study_id = study_id.x,
+    mrn = mrn.x,
+    lab_result_time = lab_result_time.x,
+    nearest_platelet = platelet,
+    platelet_time = lab_result_time.y)
+
+run_labs_complications_raw = 
+  run_labs_complications_raw %>% 
+  unnest(data) %>% 
+  left_join(coag_bili_closest,     by = c("study_id", "mrn", "lab_result_time")) %>% 
+  left_join(coag_platelet_closest, by = c("study_id", "mrn", "lab_result_time")) %>% 
   relocate(nearest_bilirubin, bilirubin_time, .after = plasma_free_hemoglobin) %>% 
+  relocate(nearest_platelet,  platelet_time,  .after = bilirubin_time) %>% 
   group_by(mrn, patient_name) %>%
   nest(data = c(lab_result_time:discordance_group)) %>% 
   ungroup() %>% 
@@ -542,6 +573,8 @@ Lab cutoffs:
 Hyperbilirubinemia can artifactually elevate anti-Xa (colorimetric assay). Jaundice threshold is 2 - 3 mg/dL total bilirubin. Upper limit of normal total bilirubin at NYP-CUIMC is 1.2 mg/dL.
 
 Bilirubin is measured in separate tubes compared to aPTT, anti-Xa, INR, and fibrinogen. As hyperbilirubinemia can impact assessment of anti-Xa but also may not change rapidly from one moment to another, we accounted for total bilirubin by computing the `nearest_bilirubin` value within 24 hours of any aPTT. (aPTT chosen as it was the most frequently measured coagulation lab).
+
+Likewise, platelet count is measured in separate tubes compared to aPTT, anti-Xa, INR, and fibrinogen. Thrombocytopenia can impact discordance (PMID 38725133). Thus, we computed `nearest_platelet` value within 24 hours of any aPTT, in a manner comparable to that of `nearest_bilirubin`.
 
 COMPLICATIONS: all complications reviewed were documented during ECMO duration, with exception of clinically significant bleeding and thrombotic complications which were manually assessed by Connie and Phil as follows:
 
@@ -642,6 +675,99 @@ tidy_data_heparin %>%
   ggplot(aes(x = department_name, fill = lab)) + geom_bar(position = "dodge") + geom_text(stat = "count", aes(label = after_stat(count)), position = position_dodge(width = 0.9), vjust = -0.5, size = 2) + theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 0.5))
 ```
 
+```{r stacked lab count, echo = FALSE}
+#--------------------------------------------------
+# 1. Total counts of aPTT and anti-Xa by location
+#--------------------------------------------------
+total_counts <- tidy_data_heparin %>%
+  mutate(
+    department_name = fct_infreq(department_name),
+    department_name = fct_relevel(department_name, "MIL 5 CTICU", "MIL 5 CCU")) %>% 
+  filter(lab %in% c("activated_partial_thromboplastin_time",
+                    "heparin_assay_quantitative")) %>%
+  group_by(department_name, lab) %>%
+  summarise(total_n = n(), .groups = "drop")
+
+#--------------------------------------------------
+# 2. Time-matched pairs by location + lab
+#--------------------------------------------------
+matched_counts <- tidy_data_heparin %>%
+  filter(lab %in% c("activated_partial_thromboplastin_time",
+                    "heparin_assay_quantitative")) %>% 
+  group_by(study_id, mrn, lab_result_time) %>%
+  pivot_wider(names_from = lab, values_from = value) %>%
+  drop_na(activated_partial_thromboplastin_time,
+          heparin_assay_quantitative) %>%
+  pivot_longer(
+    activated_partial_thromboplastin_time:heparin_assay_quantitative,
+    names_to = "lab", values_to = "value"
+  ) %>%
+  ungroup() %>%
+  group_by(department_name, lab) %>%
+  summarise(matched_n = n(), .groups = "drop")
+
+#--------------------------------------------------
+# 3. Combine
+#--------------------------------------------------
+plot_df <- total_counts %>%
+  left_join(matched_counts, by = c("department_name", "lab")) %>%
+  mutate(
+    matched_n = replace_na(matched_n, 0L)
+  ) %>%
+  # now reorder based on final total frequencies
+  mutate(
+    department_name = fct_infreq(department_name),
+    department_name = fct_relevel(department_name,
+                                  "MIL 5 CTICU", "MIL 5 CCU"),
+    lab = recode(lab,"heparin_assay_quantitative" = "anti-Xa", "activated_partial_thromboplastin_time" = "aPTT")) %>% 
+  group_by(lab) %>% 
+  mutate(lab = fct_reorder(lab, total_n, .fun = sum, .desc = TRUE)) %>%
+  ungroup()
+
+pd <- position_dodge(width = 0.9)
+
+#--------------------------------------------------
+# 4. Plot with labels for total + matched
+#--------------------------------------------------
+ggplot(plot_df, aes(x = department_name, fill = lab)) +
+  
+  # Outer TOTAL bars
+  geom_col(aes(y = total_n),
+           position = pd,
+           alpha = 0.5) +
+  geom_text(
+    aes(y = total_n, label = total_n),
+    position = pd,
+    vjust = -0.3,
+    size = 2.5,
+    color = "black"
+  ) +
+  
+  # Inner MATCHED bars
+  geom_col(aes(y = matched_n),
+           position = pd) +
+  geom_text(
+    aes(y = matched_n, label = matched_n),
+    position = pd,
+    vjust = 1.2,
+    size = 2.5,
+    color = "black"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 1, hjust = 0.5),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    x = "Location",
+    y = "Number of lab results",
+    fill = "Lab",
+    title = "Total vs Time-Matched aPTT / anti-Xa Results by Location",
+    subtitle = "Outer bar = total | Inner bar = time-matched subset of total"
+  )
+```
+
 ```{r generating .xls of distinct mrns exposed to heparin with time-matched aPTT and antiXa, include = FALSE, echo = FALSE}
 # need to generate .xls of these patients!!
 tidy_data_heparin %>% 
@@ -707,8 +833,22 @@ tidy_data_heparin %>%
   rename(
     aPTT = activated_partial_thromboplastin_time,
     antiXa = heparin_assay_quantitative) %>% 
-  plot_ly(x = ~aPTT, y = ~antiXa, type = "scatter", mode = "markers", color = ~mode, text = ~paste("MRN:", mrn)) %>% 
+  plot_ly(x = ~aPTT, y = ~antiXa, type = "scatter", mode = "markers", color = ~mode, text = ~paste("MRN:", mrn)) %>%
   layout(title = "anti-Xa and aPTT among distinct MRNs exposed to heparin - all pairs grouped by and matched by time, colored by mode")
+
+discordance_scatterplot = 
+  tidy_data_heparin %>% 
+  filter(lab == "activated_partial_thromboplastin_time" | lab == "heparin_assay_quantitative") %>% 
+  filter(department_name == "MIL 5 CCU" | department_name == "MIL 5 CTICU" | department_name == "HRT CARDIAC CARE" | department_name == "MIL 4 MICU A") %>% 
+  group_by(study_id, mrn, lab_result_time) %>% 
+  pivot_wider(
+    names_from = lab,
+    values_from = value) %>% 
+  rename(
+    aPTT = activated_partial_thromboplastin_time,
+    antiXa = heparin_assay_quantitative) %>% 
+  drop_na(concordance_classic_simple) %>% 
+  ggplot(aes(x = aPTT, y = antiXa, label = mrn, color = concordance_classic_simple)) + geom_point() + theme_minimal() +       scale_color_manual(values = c("lightgrey", "blue", "darkgreen","lightgreen", "lightblue"))
 
 icu_scatterplot = 
   tidy_data_heparin %>% 
@@ -736,6 +876,8 @@ mode_scatterplot =
     aPTT = activated_partial_thromboplastin_time,
     antiXa = heparin_assay_quantitative) %>% 
   ggplot(aes(x = aPTT, y = antiXa, color = department_name, label = mrn)) + geom_point() + facet_wrap(~mode)
+
+ggplotly(discordance_scatterplot)
 
 ggplotly(icu_scatterplot)
 
@@ -919,7 +1061,7 @@ Interpreting:
 
 **Note that one patient with both discordance groups is included in this analysis. This patient's first discordance type was "aPTT < antiXa"**
 
-```{r patient-level demographics, echo = FALSE, warning = FALSE}
+```{r patient-level demographics, echo=FALSE, warning=FALSE}
 ###############################################################################
 # 1. Assign patient-level discordance categories
 ###############################################################################
@@ -940,7 +1082,9 @@ patient_discord_groups <- model_fit_data %>%
             ever_high & ever_low     ~ "both types"
         ),
         .groups = "drop"
-    )
+    ) %>% 
+  filter(discord_group != "both types") %>% 
+  drop_na(discord_group)
 
 # optional: drop the “both types” or reassign
 # patient_discord_groups <- patient_discord_groups %>%
@@ -952,34 +1096,59 @@ patient_discord_groups <- model_fit_data %>%
 ###############################################################################
 
 patient_demographics <- model_fit_data %>%
-    group_by(mrn) %>%
-    summarise(
-        age_years = median(age_years, na.rm = TRUE),
-        sex = first(sex),
-        weight = median(weight, na.rm = TRUE),
-        height = median(height, na.rm = TRUE),
-        hours_ecmo = median(hours_ecmo, na.rm = TRUE),
-        department_name = first(department_name),
-        mode = first(mode),
-        pump_flow4 = median(pump_flow4, na.rm = TRUE),
-        pump_flow24 = median(pump_flow24, na.rm = TRUE),
-        activated_partial_thromboplastin_time =
-            median(activated_partial_thromboplastin_time, na.rm = TRUE),
-        heparin_assay_quantitative =
-            median(heparin_assay_quantitative, na.rm = TRUE),
-        international_normalization_ratio =
-            median(international_normalization_ratio, na.rm = TRUE),
-        fibrinogen = median(fibrinogen, na.rm = TRUE),
-        nearest_bilirubin = median(nearest_bilirubin, na.rm = TRUE),
-        heparin_infusion_dose_value_units_kg_hr =
-            median(heparin_infusion_dose_value_units_kg_hr, na.rm = TRUE),
-        .groups = "drop"
-    )
+   group_by(mrn) %>%
+  summarise(
+    # core demographics
+    age_years   = median(age_years, na.rm = TRUE),
+    sex         = dplyr::first(sex),
+    races       = dplyr::first(races),
+
+    # ECMO / diagnosis–related baseline info
+    support_type    = dplyr::first(support_type),
+    covid19         = dplyr::first(covid19),
+    pre_ecls_arrest = dplyr::first(pre_ecls_arrest),
+
+    # anthropometrics / severity proxies
+    weight      = median(weight, na.rm = TRUE),
+    height      = median(height, na.rm = TRUE),
+    hours_ecmo  = median(hours_ecmo, na.rm = TRUE),
+
+    # location / mode at ECMO start
+    department_name = dplyr::first(department_name),
+    mode            = dplyr::first(mode),
+
+    # pump & labs (already in your original code)
+    pump_flow4  = median(pump_flow4, na.rm = TRUE),
+    pump_flow24 = median(pump_flow24, na.rm = TRUE),
+
+    activated_partial_thromboplastin_time =
+      median(activated_partial_thromboplastin_time, na.rm = TRUE),
+
+    heparin_assay_quantitative =
+      median(heparin_assay_quantitative, na.rm = TRUE),
+
+    international_normalization_ratio =
+      median(international_normalization_ratio, na.rm = TRUE),
+
+    fibrinogen = median(fibrinogen, na.rm = TRUE),
+
+    nearest_bilirubin =
+      median(nearest_bilirubin, na.rm = TRUE),
+    
+    nearest_platelet =
+      median(nearest_platelet, na.rm = TRUE), 
+
+    heparin_infusion_dose_value_units_kg_hr =
+      median(heparin_infusion_dose_value_units_kg_hr, na.rm = TRUE),
+
+    .groups = "drop"
+  )
 
 # merge with discordance group
-(patient_level_data <- left_join(patient_demographics,
+patient_level_data <- left_join(patient_demographics,
                                  patient_discord_groups,
-                                 by = "mrn"))
+                                 by = "mrn") %>% 
+  drop_na(discord_group)
 
 ###############################################################################
 # 3. Produce group-level summaries
@@ -998,22 +1167,36 @@ group_summary <- patient_level_data %>%
         iqr_ht = IQR(height, na.rm = TRUE),
         median_hours = median(hours_ecmo, na.rm = TRUE),
         iqr_hours = IQR(hours_ecmo, na.rm = TRUE),
-        cticu_pct = mean(department_name == "MIL 5 CTICU", na.rm=TRUE)*100,
-        ccu_pct   = mean(department_name == "MIL 5 CCU", na.rm=TRUE)*100,
+        cticu_pct = mean(department_name == "MIL 5 CTICU" | department_name == "GBG 4 W CT ICU", na.rm=TRUE)*100,
+        ccu_pct   = mean(department_name == "MIL 5 CCU" | department_name == "HRT CARDIAC CARE", na.rm=TRUE)*100,
+        micu_pct = mean(department_name == "MIL 4 MICU A", na.rm=TRUE)*100,
+        otherloc_pct = mean(department_name == "MIL 4 SICU" | department_name == "MIL OPERATING ROOM" | department_name == "MIL CARDIAC CATH", na.rm=TRUE)*100,
         vv_pct = mean(mode == "VV", na.rm=TRUE)*100,
         va_pct = mean(mode == "VA", na.rm=TRUE)*100,
+        male_pct = mean(sex == "Male", na.rm=TRUE)*100,
+        female_pct = mean(sex == "Female",na.rm=TRUE)*100,
         median_aptt =
             median(activated_partial_thromboplastin_time, na.rm=TRUE),
+        iqr_appt = IQR(activated_partial_thromboplastin_time, na.rm=TRUE),
         median_antixa =
             median(heparin_assay_quantitative, na.rm=TRUE),
+        iqr_antixa = IQR(heparin_assay_quantitative,na.rm=TRUE),
         median_inr =
             median(international_normalization_ratio, na.rm=TRUE),
+        iqr_inr = IQR(international_normalization_ratio,na.rm=TRUE),
         median_fibrinogen = median(fibrinogen, na.rm=TRUE),
+        iqr_fibrinogen = IQR(fibrinogen,na.rm=TRUE),
         median_bilirubin = median(nearest_bilirubin, na.rm=TRUE),
+        iqr_bilirubin = IQR(nearest_bilirubin,na.rm=TRUE),
+        median_platelets = median(nearest_platelet, na.rm = TRUE),
+        iqr_platelets = IQR(nearest_platelet,na.rm=TRUE),
         median_hep_dose =
             median(heparin_infusion_dose_value_units_kg_hr, na.rm=TRUE),
+        iqr_hep_dose = IQR(heparin_infusion_dose_value_units_kg_hr,na.rm=TRUE),
         .groups = "drop"
-    )
+    ) %>% 
+  # dropping subject who had both high and low aPTT group discordance types
+  drop_na(discord_group)
 
 group_summary %>% knitr::kable(digits = 2)
 
@@ -1026,7 +1209,7 @@ vars_to_test <- c(
     "activated_partial_thromboplastin_time",
     "heparin_assay_quantitative",
     "international_normalization_ratio",
-    "fibrinogen", "nearest_bilirubin",
+    "fibrinogen", "nearest_bilirubin", "nearest_platelet",
     "heparin_infusion_dose_value_units_kg_hr"
 )
 
@@ -1038,7 +1221,7 @@ kw_results <- lapply(vars_to_test, function(v) {
     )
 }) %>% bind_rows()
 
-kw_results %>% knitr::kable(digits = 4, caption = "Kruskal-Wallis rank sum test results")
+kw_results %>% knitr::kable(digits = 4, caption = "Kruskal-Wallis rank sum test results, subject w both discordance types excluded ")
 
 ###############################################################################
 # 5. Pairwise Wilcoxon tests (unadjusted)
@@ -1057,11 +1240,113 @@ pairwise_results <- lapply(vars_to_test, function(v) {
 pairwise_results %>%
     select(variable, group1, group2, p.value) %>%
     knitr::kable(digits = 4, caption = "Pairwise Wilcoxon Rank Sum test results, without correction for multiple testing")
+
+###############################################################################
+# Vertical demographics table with groups across top
+###############################################################################
+
+# 1. Summaries for each variable × group, long format
+long_summary <- patient_level_data %>%
+  select(discord_group, all_of(vars_to_test)) %>%
+  pivot_longer(
+    cols = -discord_group,
+    names_to = "variable",
+    values_to = "value"
+  ) %>%
+  group_by(variable, discord_group) %>%
+  summarise(
+    median  = median(value, na.rm = TRUE),
+    iqr     = IQR(value, na.rm = TRUE),
+    summary = sprintf("%.1f (IQR %.1f)", median, iqr),
+    .groups = "drop"
+  ) %>% 
+  drop_na(discord_group)
+
+# 2. Pivot wider → now discordance groups are columns
+wide_summary <- long_summary %>%
+  select(variable, discord_group, summary) %>%
+  pivot_wider(
+    names_from = discord_group,
+    values_from = summary
+  )
+
+# 3. Add KW p-values in the same vertical layout
+kw_vertical <- kw_results %>%
+  mutate(p_value = sprintf("%.4f", p_value))
+
+final_kw_table <- left_join(
+  wide_summary,
+  kw_vertical,
+  by = "variable"
+)
+
+# 4. Display
+final_kw_table %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Vertical Summary Table with Discordance Groups Across Columns and KW P-values"
+  )
+
+###############################################################################
+# Categorical variable testing across discordance groups
+###############################################################################
+
+categorical_vars <- c("sex", "department_name", "mode", "support_type", "covid19")
+
+cat_results <- lapply(categorical_vars, function(v) {
+  
+  tbl <- table(patient_level_data[[v]], patient_level_data$discord_group)
+  
+  # choose test based on expected counts
+  test <- if(any(chisq.test(tbl)$expected < 5)) {
+    fisher.test(tbl)
+  } else {
+    chisq.test(tbl)
+  }
+  
+  tibble(
+    variable = v,
+    p_value = test$p.value
+  )
+}) %>% bind_rows()
+
+cat_results %>%
+  mutate(p_value = sprintf("%.4f", p_value)) %>%
+  knitr::kable(
+    digits = 4,
+    caption = "Categorical Variable Tests (Chi-square or Fisher Automatically Selected)"
+  )
+
+###############################################################################
+# Count + Percent table for each categorical variable
+###############################################################################
+
+cat_tables <- lapply(categorical_vars, function(v) {
+  
+  patient_level_data %>%
+    count(!!sym(v), discord_group) %>%
+    group_by(discord_group) %>%
+    mutate(pct = 100 * n / sum(n)) %>%
+    mutate(label = sprintf("%d (%.1f%%)", n, pct)) %>%
+    select(variable = !!sym(v), discord_group, label) %>%
+    pivot_wider(
+      names_from = discord_group,
+      values_from = label
+    )
+})
+
+# bind all into one printable table
+bind_rows(cat_tables) %>%
+  knitr::kable(
+    caption = "Counts and Percentages of Categorical Variables by Discordance Group"
+  )
 ```
+
+
 
 # Patient-level Demographics, based on FIRST DISCORDANCE TYPE ONLY - descriptive only for consideration in survival analyses (which are based on first discordance type), not planning to report
 
-**Note that one patient with both discordance groups is included in this analysis. This patient's first discordance type was "aPTT < antiXa"**
+**Note that the one patient with both discordance groups is included in this analysis had a FIRST discordance type was "aPTT < antiXa". This patient is dropped for between-group comparison.**
 
 ```{r patient-level first discordance, echo = FALSE}
 patient_type <- model_fit_data %>%
@@ -1120,7 +1405,7 @@ patient_type %>%
   kable(digits = 2)
 ```
 
-# Discordance vs Geographic ICU and Support Type - for Connie abstract
+# Discordance vs Geographic ICU and Support Type
 
 ```{r, echo = FALSE}
 # discordance vs specific ICU
@@ -1425,9 +1710,11 @@ patient_model_data <- patient_level_complications %>%
   filter(icu_type != "other")
 ```
 
-# 0. patient-level analyses
+# 1. patient-level analyses
 
-fibrinogen only measured in 38 patients in this model
+**Fibrinogen only measured in 38 patients, thus cannot be included as a covariable**
+
+**Note that this does not preserve time-matching of labs, which is problematic, and is based **
 
 ```{r}
 hemorrhage_patient_glm <- glm(
@@ -1435,226 +1722,60 @@ hemorrhage_patient_glm <- glm(
   data = patient_model_data,
   family = binomial)
 
-hemorrhage_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+hemorrhage_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% kable(digits = 3, caption = "Univariable regression with composite hemorrhage outcome")
 
 hemorrhage_multivariable_patient_glm <-glm(
-  hemorrhage_any ~ discord_group + international_normalization_ratio + nearest_bilirubin + heparin_infusion_dose_value_units_kg_hr,
+  hemorrhage_any ~ discord_group + international_normalization_ratio + nearest_bilirubin + heparin_infusion_dose_value_units_kg_hr + weight + nearest_platelet,
   data = patient_model_data,
   family = binomial)
 
-hemorrhage_multivariable_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+hemorrhage_multivariable_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% kable(digits = 3, caption = "Multivariable regression with composite outcome")
 
 thrombosis_patient_glm <- glm(
   thrombosis_any ~ discord_group,
   data = patient_model_data,
   family = binomial)
 
-thrombosis_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+thrombosis_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% kable(digits = 3, caption = "Univariable regression with thrombosis composite outcome")
 
 thrombosis_multivariable_patient_glm <-glm(
-  thrombosis_any ~ discord_group + international_normalization_ratio + nearest_bilirubin + heparin_infusion_dose_value_units_kg_hr,
+  thrombosis_any ~ discord_group + international_normalization_ratio + nearest_bilirubin + heparin_infusion_dose_value_units_kg_hr + nearest_platelet + weight,
   data = patient_model_data,
   family = binomial)
 
-thrombosis_multivariable_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+thrombosis_multivariable_patient_glm %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% kable(digits = 3, caption = "Multivariable regression with thrombosis composite outcome")
 ```
 
-```{r}
-hemorrhage_group_sick = glm(hemorrhage_any ~ discord_group + pump_flow24 + heparin_infusion_dose_value_units_kg_hr, data = patient_model_data, family = binomial)
-
-hemorrhage_group_sick %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
-
-thrombosis_group_sick = glm(thrombosis_any ~ discord_group + pump_flow24 + heparin_infusion_dose_value_units_kg_hr, data = patient_model_data, family = binomial)
-
-thrombosis_group_sick %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
-```
-
-# 1. unadjusted analysis - will not report
-
-```{r descriptive outcome rates, echo = FALSE}
-model_fit_complications %>% 
-  group_by(unusual_type) %>% 
-  summarize(
-    n = n(),
-    # Because TRUE = 1 and FALSE = 0 in R, mean() gives the proportion.
-    hemorrhage_rate = mean(hemorrhage_any, na.rm = TRUE)*100,
-    thrombosis_rate = mean(thrombosis_any, na.rm = TRUE)*100)
-```
-
-```{r chi.square and fisher testing, include = FALSE}
-table_hemorrhage <- table(model_fit_complications$unusual_type, model_fit_complications$hemorrhage_any)
-chisq.test(table_hemorrhage)
-fisher.test(table_hemorrhage)
-
-table_thrombosis <- table(model_fit_complications$unusual_type, model_fit_complications$thrombosis_any)
-chisq.test(table_thrombosis)
-fisher.test(table_thrombosis)
-```
-
-```{r single variable logistic models, include = TRUE, echo = FALSE}
-hemorrhage_logistic = 
-  glm(hemorrhage_any ~ unusual_type, data = model_fit_complications, family = binomial)
-
-hemorrhage_logistic
-
-summary(hemorrhage_logistic)
-
-thrombosis_logistic = 
-  glm(thrombosis_any ~ unusual_type, data = model_fit_complications, family = binomial)
-
-thrombosis_logistic
-
-summary(thrombosis_logistic)
-```
-
-# 2. adjusted analysis = PRIMARY OUTCOME RESULT
-
-Variables which would be important to adjust for based on opinion / intentional selection:
-
-* `duration_to_lab` (time_on -> lab_result_time)
-
-* `international_normalization_ratio`
-
-* `fibrinogen`
-
-* `nearest_bilirubin`
-
-* `weight` - significant as identified with between-group testing
-
-* `heparin_infusion_dose_value_units_kg_hr`
-
-Variables which specifically were not incorporated into the model as they were not between-group significant or had other good reasons:
-
-* `pump_flow4` and `pump_flow24` - specifically not chosen as they were not significantly different between groups in descriptive analyses, despite potentially functioning as marker of baseline disease severity (higher flow, sicker). We do not know illness severity and underlying disease process in this retrospective cohort study.
-
-* `mode` -> inclusion of this model caused model to possibly overfit AND our underlying premise is that discordance matters, regardless of why you are on ECMO or how it is cannulated
-
-```{r hemorrhage multivariable, warning = FALSE, echo = FALSE}
-hemorrhage_multivariable = glm(hemorrhage_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
-
-summary(hemorrhage_multivariable)
-
-vif_table <- car::vif(hemorrhage_multivariable)
-
-vif_table %>% kable(caption = "VIF collinearity check for hemorrhage multivariable model")
-
-hemorrhage_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
-  rename(OR = estimate, p_raw = p.value) %>%
-  mutate(
-  p_fdr  = p.adjust(p_raw, method = "fdr"),
-  p_holm = p.adjust(p_raw, method = "holm"),
-  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
-  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf)
-
-hemorrhage_multivariable$converged
-
-table(model_fit_complications$unusual_type, model_fit_complications$hemorrhage_any)
-
-ggplot(model_fit_complications, aes(x = unusual_type, y = hemorrhage_any)) +
-  geom_jitter(width = 0.1, height = 0.05)
-
-hemorrhage_firth = logistf::logistf(hemorrhage_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications)
-
-hemorrhage_firth_results <- tibble(
-  term      = names(hemorrhage_firth$coefficients),
-  estimate  = hemorrhage_firth$coefficients,
-  OR        = exp(hemorrhage_firth$coefficients),
-  conf.low  = exp(hemorrhage_firth$ci.lower),
-  conf.high = exp(hemorrhage_firth$ci.upper),
-  p_raw     = hemorrhage_firth$prob
-) %>%
-  mutate(
-    p_fdr  = p.adjust(p_raw, method = "fdr"),
-    p_holm = p.adjust(p_raw, method = "holm"),
-    p_bonf = p.adjust(p_raw, method = "bonf"))
-
-hemorrhage_firth_results %>% kable(caption = "Hemorrhage Firth Penalized Regression Results")
-```
-
-```{r thrombosis multivariable, warning = FALSE, echo = FALSE}
-thrombosis_multivariable = glm(thrombosis_any ~ unusual_type + international_normalization_ratio + heparin_infusion_dose_value_units_kg_hr + duration_to_lab + fibrinogen + nearest_bilirubin + weight, data = model_fit_complications, family = binomial)
-
-summary(thrombosis_multivariable)
-
-thrombosis_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
-
-vif_table <- car::vif(thrombosis_multivariable)
-
-vif_table %>% kable(caption = "VIF collinearity check for thrombosis multivariable model")
-
-thrombosis_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
-  rename(OR = estimate, p_raw = p.value) %>%
-  mutate(
-  p_fdr  = p.adjust(p_raw, method = "fdr"),
-  p_holm = p.adjust(p_raw, method = "holm"),
-  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
-  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf)
-
-thrombosis_multivariable$converged
-
-table(model_fit_complications$unusual_type, model_fit_complications$thrombosis_any)
-
-ggplot(model_fit_complications, aes(x = unusual_type, y = thrombosis_any)) +
-  geom_jitter(width = 0.1, height = 0.05)
-
-thrombosis_firth = logistf::logistf(thrombosis_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications)
-
-thrombosis_firth_results <- tibble(
-  term      = names(thrombosis_firth$coefficients),
-  estimate  = thrombosis_firth$coefficients,
-  OR        = exp(thrombosis_firth$coefficients),
-  conf.low  = exp(thrombosis_firth$ci.lower),
-  conf.high = exp(thrombosis_firth$ci.upper),
-  p_raw     = thrombosis_firth$prob) %>%
-  mutate(
-    p_fdr  = p.adjust(p_raw, method = "fdr"),
-    p_holm = p.adjust(p_raw, method = "holm"),
-    p_bonf = p.adjust(p_raw, method = "bonf"))
-
-thrombosis_firth_results %>% kable(caption = "Thrombosis Firth Penalized Regression Results")
-```
-
-### Sensitivity Analysis in which Discordance is Grouped - not to report
-```{r combined discordance groups}
-hemorrhage_simple = glm(hemorrhage_any ~ discordance_any + duration_to_lab + nearest_bilirubin + fibrinogen + international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
-
-hemorrhage_simple %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
-
-thrombosis_simple = glm(thrombosis_any ~ discordance_any + duration_to_lab + international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr + nearest_bilirubin + fibrinogen, data = model_fit_complications, family = binomial)
-
-thrombosis_simple %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
-```
-
-### Sensitivity Analysis in which outcomes are grouped
-```{r}
-complication_simple = glm(coag_event_any ~ unusual_type + duration_to_lab + nearest_bilirubin + fibrinogen + international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
-
-complication_simple %>% broom::tidy()
-```
-
-Standard logistic regression had high separation based on discordance type, likely due to uncommon outcome among a relatively small sample size with several critical covariables. Thus, Firth penalized logistic regression used to compute odds ratios and p-values.
-
-# 3. Survival Analyses
+# 2. Survival Analyses
 
 * Note that all patients retained in this model. The patient (MRN 1001491594) with multiple types of discordance is therefore included but will be analyzed by whatever happened first. Specifically, this patient's first instance of discordance was as follows: "2024-08-20 04:09:00 aPTT < antiXa", thus is included in the aPTT < antiXa survival analysis.
 
-```{r survival_analysis, echo = FALSE, warning = FALSE, message = FALSE}
+* All patients start "concordant" at ECMO cannulation (time_on).
+
+* If a patient ever becomes discordant, their **first discordance time** defines:
+  - The switch point for a **time-varying exposure** (concordant → aPTT > antiXa or aPTT < antiXa).
+  - The time at which we sample **time-matched covariates**: INR, nearest_bilirubin, nearest_platelet, weight, and heparin dose.\
+  
+* Patients who never become discordant are always in the "concordant" group and their covariates are sampled at ECMO start (time_on).
+
+* Events (bleeding and thrombosis) are followed until death or 7 days after ECMO stop, whichever comes first.
+
+```{r survival_base, echo = FALSE, warning = FALSE, message = FALSE}
 library(lubridate)
 library(survival)
 library(survminer)
+library(dplyr)
+library(purrr)
 
-###############################################################################
-# 0. PER-LAB EVENT TIMES (FROM model_fit_complications)
-###############################################################################
-
-# Starting from model_fit_complications, which still has time_on,
-# complication_7day_assessment, death_date, and all complication times.
-
+# Helper: min() that returns NA if all values are NA
 fix_na_min <- function(x) {
   out <- suppressWarnings(min(x, na.rm = TRUE))
   if (is.infinite(out)) NA else out
 }
 
+###############################################################################
+# 1. Per-lab first bleed & first clot times (lab-level, from model_fit_complications)
+###############################################################################
 time_df <- model_fit_complications %>%
   mutate(
     # ---- first hemorrhagic complication time (per lab row) ----
@@ -1695,12 +1816,11 @@ time_df <- model_fit_complications %>%
   )
 
 ###############################################################################
-# 1. PATIENT-LEVEL DATA (ONE ROW PER MRN) + TIME ZONE FIX (UTC)
+# 2. Patient-level: ECMO times and first event times, in UTC
 ###############################################################################
-
 patient_level <- time_df %>%
   group_by(mrn) %>%
-  summarize(
+  summarise(
     time_on                      = fix_na_min(time_on),
     complication_7day_assessment = fix_na_min(complication_7day_assessment),
     bleed_first                  = fix_na_min(bleed_first),
@@ -1708,7 +1828,6 @@ patient_level <- time_df %>%
     death_first                  = fix_na_min(death_date),
     .groups = "drop"
   ) %>%
-  # standardize all key times to UTC
   mutate(
     across(
       c(time_on,
@@ -1716,11 +1835,13 @@ patient_level <- time_df %>%
         bleed_first,
         clot_first,
         death_first),
-      ~ if (!all(is.na(.x))) force_tz(.x, "UTC") else .x
+      ~ if (!all(is.na(.))) force_tz(., "UTC") else .
     )
   )
 
-# First discordance per patient (from full lab data *model_fit_data*)
+###############################################################################
+# 3. First discordance per patient from model_fit_data
+###############################################################################
 first_discordance <- model_fit_data %>%
   filter(!is.na(unusual_type), unusual_type != "concordant") %>%
   arrange(mrn, lab_result_time) %>%
@@ -1729,44 +1850,38 @@ first_discordance <- model_fit_data %>%
   ungroup() %>%
   transmute(
     mrn,
-    first_discord_time = lab_result_time,
+    first_discord_time = force_tz(lab_result_time, "UTC"),
     first_discord_type = as.character(unusual_type)
-  ) %>%
-  mutate(
-    first_discord_time = force_tz(first_discord_time, "UTC")
   )
 
-# Merge to create the survival base table
+###############################################################################
+# 4. Merge into survival base table
+###############################################################################
 surv_base <- patient_level %>%
   left_join(first_discordance, by = "mrn") %>%
   mutate(
-    # align discord time zone
-    first_discord_time = if (!all(is.na(first_discord_time)))
-      force_tz(first_discord_time, "UTC") else first_discord_time,
-
-    # death after 7-day window is not a censoring time (we censor at 7-day window)
-    death_first = if_else(
-      !is.na(death_first) & death_first > complication_7day_assessment,
-      as.POSIXct(NA, tz = "UTC"),
-      death_first
-    ),
-
-    # follow-up / administrative censoring time:
-    #   min(death_first, complication_7day_assessment)
-    censor_time = if_else(
-      !is.na(death_first) & death_first <= complication_7day_assessment,
-      death_first,
-      complication_7day_assessment
-    ),
-
-    # if any discordance time is *before* ECMO start (due to TZ issues), drop it
+    # Drop discordance that appears before ECMO start (time_on) if any TZ weirdness
     first_discord_time = if_else(
       !is.na(first_discord_time) & first_discord_time < time_on,
       as.POSIXct(NA, tz = "UTC"),
       first_discord_time
     ),
 
-    # classify by first discordance type (static)
+    # Only keep deaths that happen within the 7-day window
+    death_first = if_else(
+      !is.na(death_first) & death_first > complication_7day_assessment,
+      as.POSIXct(NA, tz = "UTC"),
+      death_first
+    ),
+
+    # Censor at min(death, 7-day assessment)
+    censor_time = if_else(
+      !is.na(death_first) & death_first <= complication_7day_assessment,
+      death_first,
+      complication_7day_assessment
+    ),
+
+    # Static discordance type: if no discord, label as concordant
     first_discord_type = if_else(
       is.na(first_discord_type),
       "concordant",
@@ -1781,15 +1896,61 @@ surv_base <- patient_level %>%
 # sanity: patient counts by static discordance type
 surv_base %>%
   count(first_discord_type) %>%
-  kable(caption = "Patients by first discordance type (static classification)")
+  knitr::kable(caption = "Patients by first discordance type (static classification)")
+```
 
-###############################################################################
-# 2. STATIC KM: TIME (DAYS) FROM ECMO START TO FIRST EVENT OR CENSOR
-###############################################################################
 
+---
+
+## 2.2 Sanity checks: event timing vs discordance timing
+```{r survival_sanity_checks, echo = FALSE}
+# Thrombosis BEFORE first discordance
+throm_before_discord <- surv_base %>%
+  filter(!is.na(clot_first), !is.na(first_discord_time)) %>%
+  mutate(
+    event_in_window   = clot_first <= censor_time,
+    event_before_disc = event_in_window & clot_first < first_discord_time
+  ) %>%
+  filter(event_before_disc) %>%
+  select(mrn, time_on, first_discord_time, first_discord_type, clot_first, censor_time) %>%
+  arrange(clot_first)
+
+knitr::kable(throm_before_discord,
+             caption = "Patients with thrombosis BEFORE first discordance time")
+
+# Hemorrhage BEFORE first discordance
+bleed_before_discord <- surv_base %>%
+  filter(!is.na(bleed_first), !is.na(first_discord_time)) %>%
+  mutate(
+    event_in_window   = bleed_first <= censor_time,
+    event_before_disc = event_in_window & bleed_first < first_discord_time
+  ) %>%
+  filter(event_before_disc) %>%
+  select(mrn, time_on, first_discord_time, first_discord_type, bleed_first, censor_time) %>%
+  arrange(bleed_first)
+
+knitr::kable(bleed_before_discord,
+             caption = "Patients with hemorrhage BEFORE first discordance time")
+
+# Discordance AFTER 7-day window
+discord_after_window <- surv_base %>%
+  filter(!is.na(first_discord_time)) %>%
+  mutate(
+    discord_after_window = first_discord_time > censor_time
+  ) %>%
+  filter(discord_after_window) %>%
+  select(mrn, time_on, censor_time, first_discord_time, first_discord_type) %>%
+  arrange(first_discord_time)
+
+knitr::kable(discord_after_window,
+             caption = "Patients whose first discordance occurs AFTER the 7-day window")
+```
+
+## 2.3 Static KM curves (discordance as fixed at first discordance)
+```{r survival_static_km, echo = FALSE, warning = FALSE}
 patient_static <- surv_base %>%
   mutate(
-    # clamp events to window [time_on, censor_time]
+    # clamp events to [time_on, censor_time]
     clot_in_window = if_else(
       !is.na(clot_first) & clot_first <= censor_time,
       clot_first,
@@ -1825,11 +1986,11 @@ patient_static <- surv_base %>%
 # static event counts (sanity)
 patient_static %>%
   count(event_throm) %>%
-  kable(caption = "Static: any thrombosis during follow-up?")
+  knitr::kable(caption = "Static: any thrombosis during follow-up?")
 
 patient_static %>%
   count(event_bleed) %>%
-  kable(caption = "Static: any hemorrhage during follow-up?")
+  knitr::kable(caption = "Static: any hemorrhage during follow-up?")
 
 # ---- STATIC KM: THROMBOSIS ----
 fit_thromb_static <- survfit(
@@ -1860,16 +2021,21 @@ ggsurvplot(
   legend.title = "First discordance type",
   xlab        = "Days from ECMO cannulation"
 )
+```
 
+## 2.4 Time-varying exposure: everyone starts concordant, then switches at first discordance
+
+```{r survival_tv_build, echo = FALSE, warning = FALSE}
 ###############################################################################
-# 3. TIME-VARYING KM: DISCORDANCE AS TIME-VARYING COVARIATE
-#    everyone starts CONCORDANT at time 0, switches at first_discord_time
-#    events before discordance -> concordant; after -> discordant group
+# Build time-varying data:
+#  - Time scale: days since ECMO cannulation (time_on)
+#  - Everyone starts concordant (0 -> t_disc)
+#  - If they ever discord, from t_disc onward they are in the discordant group
+#  - Events belong to whichever interval they occur in
 ###############################################################################
 
 build_tvd <- function(df, event_time_var) {
 
-  # empty tibble template for "no follow-up" cases
   empty_out <- tibble(
     mrn = character(0),
     start = numeric(0),
@@ -1891,12 +2057,11 @@ build_tvd <- function(df, event_time_var) {
       t_disc <- row$first_discord_time
       t_evt  <- row[[event_time_var]]
 
-      # basic validity
       if (is.na(t0) || is.na(t_end) || t_end <= t0) {
         out <- empty_out
       } else {
 
-        # event must be inside [t0, t_end] to count
+        # is there an event within the window?
         if (!is.na(t_evt) && t_evt <= t_end) {
           has_event <- TRUE
           t_final   <- t_evt
@@ -1911,14 +2076,11 @@ build_tvd <- function(df, event_time_var) {
         t_final_days <- as.numeric(difftime(t_final, t0, units = "days"))
         evt_days     <- if (!is.na(t_evt))  as.numeric(difftime(t_evt,   t0, units = "days")) else NA_real_
 
-        # --------------------------------------------------------------------
-        # ⭐ ENFORCE SMALL POSITIVE MINIMUM FOR t_disc_days
-        # --------------------------------------------------------------------
+        # ensure disc time is slightly > 0 if extremely early
         if (!is.na(t_disc_days)) {
-          t_disc_days <- max(t_disc_days, 1e-6)   # <<--- FIX HERE
+          t_disc_days <- max(t_disc_days, 1e-6)
         }
-        # --------------------------------------------------------------------
-        
+
         if (t_final_days <= 0) {
           out <- empty_out
 
@@ -1940,10 +2102,9 @@ build_tvd <- function(df, event_time_var) {
           )
 
         } else {
-          # discordance occurs before final follow-up time
-          # If event occurs before discordance -> entire follow-up as concordant w/ event
+          # discordance occurs before final follow-up
           if (has_event && !is.na(evt_days) && evt_days <= t_disc_days) {
-
+            # event occurs before discordance -> always concordant
             start1 <- 0
             stop1  <- evt_days
             ev1    <- 1L
@@ -1960,13 +2121,11 @@ build_tvd <- function(df, event_time_var) {
             )
 
           } else {
-            # event after discordance or no event:
-            # interval 1: concordant (no event)
+            # event after discordance or no event at all
             start1 <- 0
             stop1  <- t_disc_days
             ev1    <- 0L
 
-            # interval 2: discordant
             start2 <- t_disc_days
             stop2  <- t_final_days
             ev2    <- if (has_event) 1L else 0L
@@ -1991,7 +2150,7 @@ build_tvd <- function(df, event_time_var) {
     filter(!is.na(start), !is.na(stop), stop > start)
 }
 
-# Build time-varying datasets for thrombosis and bleeding
+# Build TV datasets
 tv_thrombosis <- build_tvd(surv_base, event_time_var = "clot_first")
 tv_bleeding   <- build_tvd(surv_base, event_time_var = "bleed_first")
 
@@ -1999,17 +2158,16 @@ tv_bleeding   <- build_tvd(surv_base, event_time_var = "bleed_first")
 tv_thrombosis %>%
   filter(start == 0) %>%
   count(discord_group) %>%
-  kable(caption = "Time-varying thrombosis data: group membership at time 0 (should all be concordant)")
+  knitr::kable(caption = "Time-varying thrombosis data: group membership at time 0")
 
 tv_bleeding %>%
   filter(start == 0) %>%
   count(discord_group) %>%
-  kable(caption = "Time-varying bleeding data: group membership at time 0 (should all be concordant)")
+  knitr::kable(caption = "Time-varying bleeding data: group membership at time 0")
+```
 
-###############################################################################
-# 4. TIME-VARYING KM CURVES
-###############################################################################
-
+## 2.5 KM curves with time-varying discordance
+```{r survival_tv_km, echo = FALSE, warning = FALSE}
 # --- Thrombosis (time-varying discordance) ---
 fit_throm_tv <- survfit(
   Surv(start, stop, event) ~ discord_group,
@@ -2020,18 +2178,15 @@ ggsurvplot(
   fit_throm_tv,
   data = tv_thrombosis,
   conf.int = FALSE,
-  break.time.by = 5,               # <--- MATCHED GRID FOR KM & RISK TABLE
+  break.time.by = 5,
   xlab = "Days since ECMO cannulation",
   title = "Time-Varying KM: Thrombosis",
   risk.table = TRUE,
-  risk.table.height = 0.22,        # <--- GIVES ENOUGH SPACE
-  risk.table.y.text.col = TRUE,    # <--- ALIGN GROUP LABELS
+  risk.table.height = 0.22,
+  risk.table.y.text.col = TRUE,
   risk.table.y.text = FALSE,
   risk.table.title = "Number at risk (time-varying exposure)",
-  tables.theme = theme_bw(),       # clean formatting
-  font.main = c(14, "bold"),
-  font.x = c(12),
-  font.y = c(12)
+  tables.theme = theme_bw()
 )
 
 # --- Hemorrhage (time-varying discordance) ---
@@ -2044,187 +2199,175 @@ ggsurvplot(
   fit_bleed_tv,
   data = tv_bleeding,
   conf.int = FALSE,
-  break.time.by = 5,               # <--- MATCHED GRID FOR KM & RISK TABLE
+  break.time.by = 5,
   xlab = "Days since ECMO cannulation",
   title = "Time-Varying KM: Bleeding",
   risk.table = TRUE,
-  risk.table.height = 0.22,        # <--- GIVES ENOUGH SPACE
-  risk.table.y.text.col = TRUE,    # <--- ALIGN GROUP LABELS
+  risk.table.height = 0.22,
+  risk.table.y.text.col = TRUE,
   risk.table.y.text = FALSE,
   risk.table.title = "Number at risk (time-varying exposure)",
-  tables.theme = theme_bw(),       # clean formatting
-  font.main = c(14, "bold"),
-  font.x = c(12),
-  font.y = c(12)
+  tables.theme = theme_bw()
 )
 ```
 
-```{r, echo = FALSE}
-# Patients whose first thrombosis occurs BEFORE their first discordance
-throm_before_discord <- surv_base %>%
-  # Need an event time and a discordance time
-  filter(!is.na(clot_first), !is.na(first_discord_time)) %>%
+
+
+---
+
+## 2.6 Time-varying Cox models with labs captured at the moment discordance is defined
+
+Here we:
+
+- Define an **index time** per patient:
+  - `first_discord_time` if they ever become discordant,  
+  - otherwise `time_on`.
+- Grab the **nearest lab row** in `model_fit_complications` to that index time (you can cap at 24 hours if you want).
+- Merge those covariates into the **time-varying** datasets and fit Cox models.
+
+```{r survival_index_covariates, echo = FALSE, warning = FALSE}
+###############################################################################
+# 1. Index time per patient: first discordance or ECMO start
+###############################################################################
+index_times <- surv_base %>%
   mutate(
-    # Ensure event is within the analysis window
-    event_in_window = clot_first <= censor_time,
-    event_before_discord = event_in_window & clot_first < first_discord_time
+    index_time = dplyr::if_else(
+      !is.na(first_discord_time),
+      first_discord_time,
+      time_on
+    )
   ) %>%
-  filter(event_before_discord) %>%
+  select(mrn, index_time)
+
+###############################################################################
+# 2. Nearest covariate snapshot at index time (from model_fit_complications)
+###############################################################################
+covar_snapshot <- model_fit_complications %>%
   select(
     mrn,
-    time_on,
-    first_discord_time,
-    first_discord_type,
-    clot_first,
-    censor_time
+    lab_result_time,
+    international_normalization_ratio,
+    nearest_bilirubin,
+    nearest_platelet,
+    heparin_infusion_dose_value_units_kg_hr,
+    weight
   ) %>%
-  arrange(clot_first)
-
-kable(
-  throm_before_discord,
-  caption = "Patients with thrombosis BEFORE first discordance time"
-)
-```
-
-```{r, echo = FALSE}
-# Patients whose first hemorrhage occurs BEFORE their first discordance
-bleed_before_discord <- surv_base %>%
-  filter(!is.na(bleed_first), !is.na(first_discord_time)) %>%
+  inner_join(index_times, by = "mrn") %>%
   mutate(
-    event_in_window = bleed_first <= censor_time,
-    event_before_discord = event_in_window & bleed_first < first_discord_time
+    time_diff_hours = abs(as.numeric(difftime(lab_result_time, index_time, units = "hours")))
   ) %>%
-  filter(event_before_discord) %>%
-  select(
-    mrn,
-    time_on,
-    first_discord_time,
-    first_discord_type,
-    bleed_first,
-    censor_time
+  group_by(mrn) %>%
+  slice_min(time_diff_hours, with_ties = FALSE) %>%
+  ungroup()
+  # If you want to restrict to labs within 24 hours of index_time:
+  # %>% filter(time_diff_hours <= 24)
+
+covar_snapshot %>%
+  summarise(
+    n_patients_with_covars = n_distinct(mrn),
+    median_time_diff_hours = median(time_diff_hours, na.rm = TRUE),
+    max_time_diff_hours    = max(time_diff_hours, na.rm = TRUE)
   ) %>%
-  arrange(bleed_first)
+  knitr::kable(digits = 2,
+               caption = "Time difference (hours) between index time and matched lab per patient")
 
-kable(
-  bleed_before_discord,
-  caption = "Patients with hemorrhage BEFORE first discordance time"
-)
-```
-
-```{r, echo = FALSE}
-discord_after_window <- surv_base %>%
-  filter(!is.na(first_discord_time)) %>%
-  mutate(
-    discord_after_window = first_discord_time > censor_time
-  ) %>%
-  filter(discord_after_window) %>%
-  select(
-    mrn,
-    time_on,
-    censor_time,
-    first_discord_time,
-    first_discord_type
-  ) %>%
-  arrange(first_discord_time)
-
-kable(
-  discord_after_window,
-  caption = "Patients whose first discordance occurs AFTER the 7-day window"
-)
-```
-
-```{r who switched when for understanding, echo = FALSE}
-discord_switches <- tv_thrombosis %>%
-  filter(discord_group != "concordant") %>%         # keep only discordant intervals
-  group_by(mrn, discord_group) %>%
-  summarize(
-    switch_time = min(start),                       # time (in days) they entered the group
-    .groups = "drop"
-  ) %>%
-  arrange(switch_time)
-
-kable(discord_switches, caption = "Patients entering each discordant group and their entry times for HELP CLARIFYING RISK TABLE COUNTS")
-
-fit_throm_tv
-```
-
-Note that the static curve risk table counts align perfectly with counts of patient by development of any discordance in the above Demographic descriptive comparisons.
-
-Note also that the 113 patients all start with concordant values. Some patients develop discordance later, and then they start 0 time recategorizes them as "0". The time-varying curves are aligned by interval start times, not global time 0. So, among patients with aPTT < antiXa in the thrombus curve, n.start indicates that 10 patients are "at risk" at the earliest time for this group, based on days since ECMO cannulation. (Though their start time is based on development of discordance, plotted from interval start time, and in risk table based on days since ECMO cannulation).
-
-Note also that this approach is only testing the impact of _first_ discordance. Repeated episodes of discordance, or discordance severity, not being analyzed. Thus, direct comparison with logistic regression is challenging.
-
-## Time varying Cox model - SECONDARY OUTCOME RESULT
-```{r, echo = FALSE}
-# patient-level covariates for Cox model
-cox_covariates <- patient_level_data %>%
+cox_covars_indexed <- covar_snapshot %>%
   select(
     mrn,
     international_normalization_ratio,
-    fibrinogen,
     nearest_bilirubin,
-    weight,
-    heparin_infusion_dose_value_units_kg_hr
-  )
-
-# merge covariates into time-varying thrombosis data
-tv_thrombosis_merged <- tv_thrombosis %>%
-  left_join(cox_covariates, by = "mrn") %>%
-  # optional: keep only complete cases for these covariates
-  filter(
-    !is.na(international_normalization_ratio),
-    !is.na(fibrinogen),
-    !is.na(nearest_bilirubin),
-    !is.na(weight),
-    !is.na(heparin_infusion_dose_value_units_kg_hr)
-  )
-
-# same for hemorrhage
-tv_bleeding_merged <- tv_bleeding %>%
-  left_join(cox_covariates, by = "mrn") %>%
-  filter(
-    !is.na(international_normalization_ratio),
-    !is.na(fibrinogen),
-    !is.na(nearest_bilirubin),
-    !is.na(weight),
-    !is.na(heparin_infusion_dose_value_units_kg_hr)
+    nearest_platelet,
+    heparin_infusion_dose_value_units_kg_hr,
+    weight
   )
 ```
 
-```{r, echo = FALSE}
-fit_thromb_tv_cox <- coxph(
-  Surv(start, stop, event) ~
-    discord_group +
-    international_normalization_ratio +
-    fibrinogen +
-    heparin_infusion_dose_value_units_kg_hr +
-    nearest_bilirubin +
-    weight +
-    cluster(mrn),                      # robust SE for repeated intervals
-  data = tv_thrombosis_merged,
-  na.action = na.exclude              # keeps N in residuals etc if any NA remain
-)
-    
-broom::tidy(fit_thromb_tv_cox, exponentiate = TRUE, conf.int = TRUE) %>% 
-  mutate(HR = estimate, .keep = "unused") %>% kable(digits = 4, caption = "Hazard Ratios for time-varying Cox proportional hazard model of association with thrombosis")
-```
+```{r survival_tv_indexed_cox, echo = FALSE, warning = FALSE}
+###############################################################################
+# 3. Merge indexed covariates into time-varying datasets
+###############################################################################
+tv_thrombosis_indexed <- tv_thrombosis %>%
+  left_join(cox_covars_indexed, by = "mrn") %>%
+  filter(
+    !is.na(international_normalization_ratio),
+    !is.na(nearest_bilirubin),
+    !is.na(nearest_platelet),
+    !is.na(heparin_infusion_dose_value_units_kg_hr),
+    !is.na(weight)
+  )
 
-```{r, echo = FALSE}
-fit_bleed_tv_cox <- coxph(
+tv_bleeding_indexed <- tv_bleeding %>%
+  left_join(cox_covars_indexed, by = "mrn") %>%
+  filter(
+    !is.na(international_normalization_ratio),
+    !is.na(nearest_bilirubin),
+    !is.na(nearest_platelet),
+    !is.na(heparin_infusion_dose_value_units_kg_hr),
+    !is.na(weight)
+  )
+
+tv_thrombosis_indexed %>%
+  count(discord_group) %>%
+  knitr::kable(caption = "Thrombosis TV data: intervals by discordance group (with indexed labs)")
+
+tv_bleeding_indexed %>%
+  count(discord_group) %>%
+  knitr::kable(caption = "Bleeding TV data: intervals by discordance group (with indexed labs)")
+
+###############################################################################
+# 4. Time-varying Cox models
+###############################################################################
+cox_thromb_indexed <- coxph(
   Surv(start, stop, event) ~
     discord_group +
     international_normalization_ratio +
-    fibrinogen +
     nearest_bilirubin +
-    weight +
+    nearest_platelet +
     heparin_infusion_dose_value_units_kg_hr +
+    weight +
     cluster(mrn),
-  data = tv_bleeding_merged,
+  data = tv_thrombosis_indexed,
   na.action = na.exclude
 )
 
-broom::tidy(fit_bleed_tv_cox, exponentiate = TRUE, conf.int = TRUE) %>% 
-  mutate(HR = estimate, .keep = "unused") %>% kable(digits = 4, caption = "Hazard Ratios for time-varying Cox proportional hazard model of association with hemorrhage")
+thromb_indexed_results <- broom::tidy(
+  cox_thromb_indexed,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  mutate(HR = estimate, .keep = "unused")
+
+thromb_indexed_results %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Time-varying Cox model (thrombosis): discordance + labs at time of first discordance"
+  )
+
+cox_bleed_indexed <- coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    international_normalization_ratio +
+    nearest_bilirubin +
+    nearest_platelet +
+    heparin_infusion_dose_value_units_kg_hr +
+    weight +
+    cluster(mrn),
+  data = tv_bleeding_indexed,
+  na.action = na.exclude
+)
+
+bleed_indexed_results <- broom::tidy(
+  cox_bleed_indexed,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  mutate(HR = estimate, .keep = "unused")
+
+bleed_indexed_results %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Time-varying Cox model (bleeding): discordance + labs at time of first discordance"
+  )
 ```
 
 ### Comments on discrepancy between logistic and survival analyses
@@ -2260,64 +2403,6 @@ broom::tidy(fit_bleed_tv_cox, exponentiate = TRUE, conf.int = TRUE) %>%
 Note: composited renal failure types into `renal_failure_any`
 
 Ultimately there are very few of these outcomes (except renal failure and death).
-
-```{r, warning = FALSE, echo = FALSE}
-model_fit_complications %>% select(mrn, lab_result_time, unusual_type, death_date, mechanical_circuit_change, renal_creatinine_3_0, renal_creatinine_1_5_3_0, renal_renal_replacement_therapy_required, metabolic_moderate_hemolysis, major_hemolysis_perfusion) %>% 
-  pivot_longer(
-    death_date:major_hemolysis_perfusion,
-    names_to = "complication",
-    values_to = "time") %>% 
-  drop_na() %>% 
-  group_by(complication) %>% 
-  distinct(mrn) %>% 
-  count()
-
-# death
-death_univariable = glm(death_event ~ unusual_type, data = model_fit_complications, family = binomial)
-
-death_univariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
-  rename(OR = estimate, p_raw = p.value) %>%
-  mutate(
-  p_fdr  = p.adjust(p_raw, method = "fdr"),
-  p_holm = p.adjust(p_raw, method = "holm"),
-  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
-  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf)
-
-death_multivariable = glm(death_event ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
-
-death_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
-  rename(OR = estimate, p_raw = p.value) %>%
-  mutate(
-  p_fdr  = p.adjust(p_raw, method = "fdr"),
-  p_holm = p.adjust(p_raw, method = "holm"),
-  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
-  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf) %>% kable(caption = "Death outcome, multivariable adjusted logistic")
-
-# renal failure
-renal_failure_df = model_fit_complications %>% select(mrn, lab_result_time, duration_to_lab, international_normalization_ratio, fibrinogen, nearest_bilirubin, weight, heparin_infusion_dose_value_units_kg_hr, unusual_type, death_date, mechanical_circuit_change, renal_creatinine_3_0, renal_creatinine_1_5_3_0, renal_renal_replacement_therapy_required, metabolic_moderate_hemolysis, major_hemolysis_perfusion) %>% 
-  mutate(
-    renal_failure_any = if_any(
-      c(
-        renal_creatinine_3_0,
-        renal_creatinine_1_5_3_0,
-        renal_renal_replacement_therapy_required),
-      ~ !is.na(.x)),
-    renal_failure_any = as.factor(renal_failure_any))
-
-aki_univariable = glm(renal_failure_any ~ unusual_type, data = renal_failure_df, family = binomial)
-
-summary(aki_univariable)
-
-aki_multivariable = glm(renal_failure_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = renal_failure_df, family = binomial)
-
-aki_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
-  rename(OR = estimate, p_raw = p.value) %>%
-  mutate(
-  p_fdr  = p.adjust(p_raw, method = "fdr"),
-  p_holm = p.adjust(p_raw, method = "holm"),
-  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
-  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf) %>% kable(caption = "Renal Failure Odds Ratios, Adjusted")
-```
 
 # 5. Do counts of discordance differ when using classical (range-based) discordance categorization versus those identified with polynomial model? - CONSIDER FOR ADDITIONAL ABSTRACT
 
@@ -2533,7 +2618,7 @@ print(chisq.test(discord_types, simulate.p.value = TRUE, B = 5000)) %>% broom::t
 
 # 6. Do counts of complications by discordance type differ when using classical (range-based) discordance categorization versus those identified with polynomial model?
 
-**Note that this analysis eliminated 1 lab results in which aPTT was above typical goal rangs and time-matched anti-Xa was below typical goal range and 1 lab result in which aPTT was below typical goal range and time-matched anti-Xa was above typical goal range.**
+**Note that this analysis eliminated 1 lab results in which aPTT was above typical goal range and time-matched anti-Xa was below typical goal range and 1 lab result in which aPTT was below typical goal range and time-matched anti-Xa was above typical goal range.**
 
 ```{r thrombosis classic vs polynomial, echo = FALSE}
 # ---- Helper function ----
@@ -2708,6 +2793,151 @@ for (cat in categories) {
   cat("\n\n")
 }
 ```
+
+# LAB based unadjusted analysis => NOT TO REPORT
+
+```{r descriptive outcome rates, echo = FALSE}
+model_fit_complications %>% 
+  group_by(unusual_type) %>% 
+  summarize(
+    n = n(),
+    # Because TRUE = 1 and FALSE = 0 in R, mean() gives the proportion.
+    hemorrhage_rate = mean(hemorrhage_any, na.rm = TRUE)*100,
+    thrombosis_rate = mean(thrombosis_any, na.rm = TRUE)*100)
+```
+
+```{r chi.square and fisher testing, include = FALSE}
+table_hemorrhage <- table(model_fit_complications$unusual_type, model_fit_complications$hemorrhage_any)
+chisq.test(table_hemorrhage)
+fisher.test(table_hemorrhage)
+
+table_thrombosis <- table(model_fit_complications$unusual_type, model_fit_complications$thrombosis_any)
+chisq.test(table_thrombosis)
+fisher.test(table_thrombosis)
+```
+
+```{r single variable logistic models, include = TRUE, echo = FALSE}
+hemorrhage_logistic = 
+  glm(hemorrhage_any ~ unusual_type, data = model_fit_complications, family = binomial)
+
+hemorrhage_logistic
+
+summary(hemorrhage_logistic)
+
+thrombosis_logistic = 
+  glm(thrombosis_any ~ unusual_type, data = model_fit_complications, family = binomial)
+
+thrombosis_logistic
+
+summary(thrombosis_logistic)
+```
+
+# LAB based adjusted analysis - note that this NOT PATIENT LEVEL => NOT TO REPORT
+
+```{r hemorrhage multivariable, warning = FALSE, echo = FALSE}
+hemorrhage_multivariable = glm(hemorrhage_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
+
+summary(hemorrhage_multivariable)
+
+vif_table <- car::vif(hemorrhage_multivariable)
+
+vif_table %>% kable(caption = "VIF collinearity check for hemorrhage multivariable model")
+
+hemorrhage_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  rename(OR = estimate, p_raw = p.value) %>%
+  mutate(
+  p_fdr  = p.adjust(p_raw, method = "fdr"),
+  p_holm = p.adjust(p_raw, method = "holm"),
+  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
+  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf)
+
+hemorrhage_multivariable$converged
+
+table(model_fit_complications$unusual_type, model_fit_complications$hemorrhage_any)
+
+ggplot(model_fit_complications, aes(x = unusual_type, y = hemorrhage_any)) +
+  geom_jitter(width = 0.1, height = 0.05)
+
+hemorrhage_firth = logistf::logistf(hemorrhage_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications)
+
+hemorrhage_firth_results <- tibble(
+  term      = names(hemorrhage_firth$coefficients),
+  estimate  = hemorrhage_firth$coefficients,
+  OR        = exp(hemorrhage_firth$coefficients),
+  conf.low  = exp(hemorrhage_firth$ci.lower),
+  conf.high = exp(hemorrhage_firth$ci.upper),
+  p_raw     = hemorrhage_firth$prob
+) %>%
+  mutate(
+    p_fdr  = p.adjust(p_raw, method = "fdr"),
+    p_holm = p.adjust(p_raw, method = "holm"),
+    p_bonf = p.adjust(p_raw, method = "bonf"))
+
+hemorrhage_firth_results %>% kable(caption = "Hemorrhage Firth Penalized Regression Results")
+```
+
+```{r thrombosis multivariable, warning = FALSE, echo = FALSE}
+thrombosis_multivariable = glm(thrombosis_any ~ unusual_type + international_normalization_ratio + heparin_infusion_dose_value_units_kg_hr + duration_to_lab + fibrinogen + nearest_bilirubin + weight, data = model_fit_complications, family = binomial)
+
+summary(thrombosis_multivariable)
+
+thrombosis_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+
+vif_table <- car::vif(thrombosis_multivariable)
+
+vif_table %>% kable(caption = "VIF collinearity check for thrombosis multivariable model")
+
+thrombosis_multivariable %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  rename(OR = estimate, p_raw = p.value) %>%
+  mutate(
+  p_fdr  = p.adjust(p_raw, method = "fdr"),
+  p_holm = p.adjust(p_raw, method = "holm"),
+  p_bonf = p.adjust(p_raw, method = "bonferroni")) %>% 
+  select(term, OR, conf.low, conf.high, p_raw, p_fdr, p_holm, p_bonf)
+
+thrombosis_multivariable$converged
+
+table(model_fit_complications$unusual_type, model_fit_complications$thrombosis_any)
+
+ggplot(model_fit_complications, aes(x = unusual_type, y = thrombosis_any)) +
+  geom_jitter(width = 0.1, height = 0.05)
+
+thrombosis_firth = logistf::logistf(thrombosis_any ~ unusual_type + duration_to_lab + international_normalization_ratio + fibrinogen + nearest_bilirubin + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications)
+
+thrombosis_firth_results <- tibble(
+  term      = names(thrombosis_firth$coefficients),
+  estimate  = thrombosis_firth$coefficients,
+  OR        = exp(thrombosis_firth$coefficients),
+  conf.low  = exp(thrombosis_firth$ci.lower),
+  conf.high = exp(thrombosis_firth$ci.upper),
+  p_raw     = thrombosis_firth$prob) %>%
+  mutate(
+    p_fdr  = p.adjust(p_raw, method = "fdr"),
+    p_holm = p.adjust(p_raw, method = "holm"),
+    p_bonf = p.adjust(p_raw, method = "bonf"))
+
+thrombosis_firth_results %>% kable(caption = "Thrombosis Firth Penalized Regression Results")
+```
+
+###  LAB based, not patient-level, Sensitivity Analysis in which Discordance is Grouped - not to report
+```{r combined discordance groups}
+hemorrhage_simple = glm(hemorrhage_any ~ discordance_any + duration_to_lab + nearest_bilirubin + fibrinogen + international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
+
+hemorrhage_simple %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+
+thrombosis_simple = glm(thrombosis_any ~ discordance_any + duration_to_lab + international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr + nearest_bilirubin + fibrinogen, data = model_fit_complications, family = binomial)
+
+thrombosis_simple %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE)
+```
+
+### Lab-based, not patient level, Sensitivity Analysis in which outcomes are grouped
+```{r}
+complication_simple = glm(coag_event_any ~ unusual_type + duration_to_lab + nearest_bilirubin + fibrinogen + international_normalization_ratio + weight + heparin_infusion_dose_value_units_kg_hr, data = model_fit_complications, family = binomial)
+
+complication_simple %>% broom::tidy()
+```
+
+Standard logistic regression had high separation based on discordance type, likely due to uncommon outcome among a relatively small sample size with several critical covariables. Thus, Firth penalized logistic regression used to compute odds ratios and p-values.
 
 # CONCLUSIONS
 - thrombotic and hemorrhagic events are common among ECMO patients
