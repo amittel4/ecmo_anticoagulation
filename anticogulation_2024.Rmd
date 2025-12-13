@@ -40,50 +40,58 @@ _Hypothesis 2_: Discordance between aPTT and anti-Xa indicates the presence of c
 Source: NYP GUIDLINE "UNFRACTIONATED HEPARIN INTRAVENOUS (IV) DOSING AND MONITORING FOR ADULT INPATIENTS RECEIVING EXTRACORPOREAL MEMBRANE OXYGENATION (ECMO)" Approved Dec 2022
 
 ```{r read in and janitoring, include = FALSE}
+# -------------------------------------------------------------------
 # importing lab data
+# -------------------------------------------------------------------
 lab_data = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx") %>% 
   janitor::clean_names() %>% 
   mutate(mrn = as.character(mrn)) %>% 
-  select(-ecmo_start, -ecmo_stop, -patient_id, -encounter_csn, -procedure_order_id, -lab_component_id, -lab_result_units, -location_name, -location_id, -department_id, -bed_name, -bed_id, -heparin_infusion_order_id, -heparin_infusion_medication_name, -heparin_infusion_medication_id, -heparin_infusion_time, -heparin_infusion_action) %>% 
+  select(-ecmo_start, -ecmo_stop, -patient_id, -encounter_csn, -procedure_order_id,
+         -lab_component_id, -lab_result_units, -location_name, -location_id,
+         -department_id, -bed_name, -bed_id, -heparin_infusion_order_id,
+         -heparin_infusion_medication_name, -heparin_infusion_medication_id,
+         -heparin_infusion_time, -heparin_infusion_action) %>% 
   group_by(mrn, patient_name, lab_result_time) %>% 
   mutate(lab_result_value = as.numeric(lab_result_value)) %>% 
-    # if data is duplicated at a specific timepoint (e.g. 2 lab samples, exact same result time but different values), then taking the mean of the two exact same-timed values
-  pivot_wider(names_from = lab_component_name, values_from = lab_result_value, values_fn = list(lab_result_value = mean)) %>%
+  # if duplicated exact timestamp -> mean
+  pivot_wider(
+    names_from = lab_component_name,
+    values_from = lab_result_value,
+    values_fn = list(lab_result_value = mean)
+  ) %>%
   janitor::clean_names() %>% 
   ungroup() %>% 
-  pivot_longer(
-    bilirubin_indirect_nyp:plasma_free_hemoglobin_nyp) %>%
+  pivot_longer(bilirubin_indirect_nyp:plasma_free_hemoglobin_nyp) %>%
   mutate(
-    name = str_remove(name, "_nyp"),
-    name = as.factor(name),
+    name  = str_remove(name, "_nyp"),
+    name  = as.factor(name),
     value = as.numeric(value),
-# if aPTT <20.0 - made 0
-# if aPTT >180 - made 180
-# if anti-Xa <0.04 or <0.1 - made 0
-# if anti-Xa >2.00 - made 2.0
+    # recodes
     value = case_when(
       name == "heparin_assay_quantitative" & value == "<0.04" ~ 0,
-      name == "heparin_assay_quantitative" & value == "<0.1" ~ 0,
+      name == "heparin_assay_quantitative" & value == "<0.1"  ~ 0,
       name == "heparin_assay_quantitative" & value == ">2.00" ~ 2.0,
       name == "activated_partial_thromboplastin_time" & value == "<20.0" ~ 0,
       name == "activated_partial_thromboplastin_time" & value == ">180.0" ~ 180,
-      TRUE ~ value)) %>% 
+      TRUE ~ value
+    )
+  ) %>% 
   ungroup() %>% 
   group_by(mrn, patient_name, lab_result_time) %>% 
-  # adding heparin dose to labs that were exact same time-stamped (original data only included heparin dose for anti-Xa and aPTT)
+  # add heparin dose to other labs at same timestamp
   mutate(
     dose_replacement = first(heparin_infusion_dose_value_units_kg_hr[heparin_infusion_dose_value_units_kg_hr != "NULL"]),
     heparin_infusion_dose_value_units_kg_hr = if_else(
       heparin_infusion_dose_value_units_kg_hr == "NULL",
       dose_replacement,
-      heparin_infusion_dose_value_units_kg_hr)) %>% 
+      heparin_infusion_dose_value_units_kg_hr
+    )
+  ) %>% 
   ungroup() %>% 
   select(-dose_replacement) %>% 
   filter(!is.na(value)) %>% 
   group_by(mrn, patient_name, lab_result_time) %>% 
-  pivot_wider(
-    names_from = name,
-    values_from = value) %>% 
+  pivot_wider(names_from = name, values_from = value) %>% 
   mutate(
     concordance_classic = case_when(
       # antiXa 0.2 - 0.5 vs aPTT 45 - 65 (CLASSIC GOAL)
@@ -96,7 +104,8 @@ lab_data = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx") %>%
       activated_partial_thromboplastin_time >= 45 & activated_partial_thromboplastin_time <= 65 & heparin_assay_quantitative > 0.5 ~ "high antiXa",
       activated_partial_thromboplastin_time < 45 & heparin_assay_quantitative > 0.5 ~ "low aPTT high antiXa",
       activated_partial_thromboplastin_time > 65 & heparin_assay_quantitative < 0.2 ~ "high aPTT low antiXa",
-      TRUE ~ NA_character_),
+      TRUE ~ NA_character_
+    ),
     concordance_low = case_when(
       # antiXa 0.1 - 0.3 vs aPTT 35 - 50 (LOW GOAL)
       activated_partial_thromboplastin_time >= 35 & activated_partial_thromboplastin_time <= 50 & heparin_assay_quantitative >= 0.1 & heparin_assay_quantitative <= 0.3 ~ "concordant",
@@ -108,33 +117,31 @@ lab_data = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx") %>%
       activated_partial_thromboplastin_time >= 35 & activated_partial_thromboplastin_time <= 50 & heparin_assay_quantitative > 0.3 ~ "high antiXa",
       activated_partial_thromboplastin_time < 35 & heparin_assay_quantitative > 0.3 ~ "low aPTT high antiXa",
       activated_partial_thromboplastin_time > 50 & heparin_assay_quantitative < 0.1 ~ "high aPTT low antiXa",
-      TRUE ~ NA_character_),
+      TRUE ~ NA_character_
+    ),
     concordance_classic_simple = case_when(
-      concordance_classic == "concordant" ~ "concordant",
-      concordance_classic == "concordant low" ~ "concordant",
-      concordance_classic == "concordant high" ~ "concordant",
+      concordance_classic %in% c("concordant", "concordant low", "concordant high") ~ "concordant",
       concordance_classic == "low aPTT" ~ "discordant aPTT below antiXa",
       concordance_classic == "high aPTT" ~ "discordant aPTT above antiXa",
       concordance_classic == "low antiXa" ~ "discordant aPTT above antiXa",
       concordance_classic == "high antiXa" ~ "discordant aPTT below antiXa",
       concordance_classic == "low aPTT high antiXa" ~ "low aPTT high antiXa",
       concordance_classic == "high aPTT low antiXa" ~ "high aPTT low antiXa",
-      TRUE ~ NA_character_),
+      TRUE ~ NA_character_
+    ),
     concordance_low_simple = case_when(
-      concordance_low == "concordant" ~ "concordant",
-      concordance_low == "concordant low" ~ "concordant",
-      concordance_low == "concordant high" ~ "concordant",
+      concordance_low %in% c("concordant", "concordant low", "concordant high") ~ "concordant",
       concordance_low == "low aPTT" ~ "discordant aPTT below antiXa",
       concordance_low == "high aPTT" ~ "discordant aPTT above antiXa",
       concordance_low == "low antiXa" ~ "discordant aPTT above antiXa",
       concordance_low == "high antiXa" ~ "discordant aPTT below antiXa",
       concordance_low == "low aPTT high antiXa" ~ "low aPTT high antiXa",
       concordance_low == "high aPTT low antiXa" ~ "high aPTT low antiXa",
-      TRUE ~ NA_character_)) %>% 
+      TRUE ~ NA_character_
+    )
+  ) %>% 
   group_by(mrn, patient_name, lab_result_time) %>% 
-  pivot_longer(
-    bilirubin_indirect:plasma_free_hemoglobin,
-    names_to = "lab") %>% 
+  pivot_longer(bilirubin_indirect:plasma_free_hemoglobin, names_to = "lab") %>% 
   filter(!is.na(value)) %>% 
   mutate(
     heparin_infusion_dose_value_units_kg_hr = as.numeric(heparin_infusion_dose_value_units_kg_hr),
@@ -143,76 +150,77 @@ lab_data = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx") %>%
     concordance_classic = as.factor(concordance_classic),
     concordance_low = as.factor(concordance_low),
     concordance_classic_simple = as.factor(concordance_classic_simple),
-    concordance_low_simple = as.factor(concordance_low_simple)) %>% 
-  pivot_wider(
-    names_from = lab,
-    values_from = value) %>% 
+    concordance_low_simple = as.factor(concordance_low_simple)
+  ) %>% 
+  pivot_wider(names_from = lab, values_from = value) %>% 
   ungroup()
 
-lab_nest = 
-  lab_data %>% 
-  group_by(mrn, patient_name) %>% nest(data = c(lab_result_time:plasma_free_hemoglobin))
+lab_nest = lab_data %>% 
+  group_by(mrn, patient_name) %>% 
+  nest(data = c(lab_result_time:plasma_free_hemoglobin))
 
-# importing patient_run ELSO data and selecting only first ECMO run; confirming no duplicated patients
+# -------------------------------------------------------------------
+# importing patient_run ELSO data and selecting only first ECMO run
+# -------------------------------------------------------------------
 patient_run = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx", sheet = "PatientRun") %>%
   janitor::clean_names() %>% 
   filter(run_no == 1) %>% 
   mutate(mrn = as.character(mrn))
 
-patient_run %>% group_by(patient_id) %>%
-  filter(n() > 1)
+patient_run %>% group_by(patient_id) %>% filter(n() > 1)
 
+# -------------------------------------------------------------------
 # importing complication ELSO data and selecting only first ECMO run
+# -------------------------------------------------------------------
 complication_raw = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx", sheet = "Complications") %>% 
   janitor::clean_names() %>% 
   filter(run_no == 1)
 
-# patient_run and complication_raw both have same patient_id
 patient_complication_alone = 
   full_join(patient_run, complication_raw, by = c("patient_id", "run_id", "run_no")) %>% 
   group_by(mrn, patient_name) %>% 
-  mutate(
-    time = lubridate::mdy_hms(str_trim(time))) %>% 
-  pivot_wider(
-    names_from = description,
-    values_from = time) %>% 
+  mutate(time = lubridate::mdy_hms(str_trim(time))) %>% 
+  pivot_wider(names_from = description, values_from = time) %>% 
   janitor::clean_names() %>% 
   select(1, 3, 5, 6, 7, 9, 10, 12, 13,14,15,27,28,29,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,69,70,71,72,140,141,142,143,144,145,146,147,148,149,150,151,152,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190) %>% 
   group_by(mrn, patient_name) %>% 
   summarise(across(
     metabolic_hyperbilirubinemia:mechanical_air_in_circuit,
-    ~ {
-      val <- min(.x, na.rm = TRUE)
-      if (is.infinite(val)) NA else val
-    },
+    ~ { val <- min(.x, na.rm = TRUE); if (is.infinite(val)) NA else val },
     .names = "first_{.col}"
   ), .groups = "drop")
 
 patient_complication_rundata = 
   full_join(patient_run, complication_raw, by = c("patient_id", "run_id", "run_no")) %>% 
   group_by(mrn, patient_name) %>% 
-  mutate(
-    time = lubridate::mdy_hms(str_trim(time))) %>% 
-  pivot_wider(
-    names_from = description,
-    values_from = time) %>% 
+  mutate(time = lubridate::mdy_hms(str_trim(time))) %>% 
+  pivot_wider(names_from = description, values_from = time) %>% 
   janitor::clean_names() %>% 
   select(1, 3, 5, 6, 7, 9, 10, 12, 13,14,15,27,28,29,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,69,70,71,72,140,141,142,143,144,145,146,147,148,149,150,151,152,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190) %>% 
   group_by(mrn, patient_name) %>% 
   select(-c(metabolic_hyperbilirubinemia:mechanical_air_in_circuit)) %>%
   distinct(mrn, patient_name, .keep_all = TRUE)
 
-patient_run_complication_raw = left_join(patient_complication_rundata, patient_complication_alone, by = c("mrn","patient_name")) %>% 
+patient_run_complication_raw =
+  left_join(patient_complication_rundata, patient_complication_alone, by = c("mrn","patient_name")) %>% 
   select(-center_no) %>% 
   mutate(
-    across(c(time_on, time_off, icu_discharge_date, enteral_feeding, birthdate, admit_date, intubation_date, invasive_ventilation_date, oral_endotracheal_tube_removal, discharge_date, death_date), ~ lubridate::mdy_hms(.x))) %>% 
+    across(
+      c(time_on, time_off, icu_discharge_date, enteral_feeding, birthdate, admit_date,
+        intubation_date, invasive_ventilation_date, oral_endotracheal_tube_removal,
+        discharge_date, death_date),
+      ~ lubridate::mdy_hms(.x)
+    )
+  ) %>% 
   rename_with(~ str_remove(., "^first_"), starts_with("first_")) %>% 
-  filter(!(is.na(mrn)))
+  filter(!is.na(mrn))
 
 patient_run_complication_raw %>% distinct(mrn, patient_id)
 
-# merging lab_data and patient_complication_raw
-run_labs_complications_raw = 
+# -------------------------------------------------------------------
+# merge lab_data and patient_run/complication
+# -------------------------------------------------------------------
+run_labs_complications_raw =
   left_join(lab_nest, patient_run_complication_raw, by = c("mrn","patient_name")) %>% 
   ungroup() %>% 
   mutate(
@@ -261,10 +269,13 @@ run_labs_complications_raw =
     age_years = as.numeric(age_years),
     patient_transported_new = as.factor(patient_transported_new),
     intubated = as.factor(intubated),
-    invasive_ventilation = as.factor(invasive_ventilation)) %>% 
+    invasive_ventilation = as.factor(invasive_ventilation)
+  ) %>% 
   select(study_id, mrn, patient_name, data, everything())
 
-# identifying one discordance category per all labs per mrn
+# -------------------------------------------------------------------
+# identify one discordance category per patient (study_id)
+# -------------------------------------------------------------------
 discordance_by_studyid = 
   run_labs_complications_raw %>% 
   group_by(study_id, mrn, patient_name) %>% 
@@ -272,57 +283,56 @@ discordance_by_studyid =
   pivot_longer(
     bilirubin_indirect:plasma_free_hemoglobin,
     names_to = "lab",
-    values_to = "value") %>% 
+    values_to = "value"
+  ) %>% 
   filter(!is.na(value)) %>% 
-  #including only patients on heparin
   filter(!is.na(heparin_infusion_dose_value_units_kg_hr)) %>% 
-  # focusing only on simple groupings of concordance
   select(-concordance_classic, -concordance_low) %>%
   pivot_longer(
     concordance_classic_simple:concordance_low_simple,
     names_to = "hypothetical_treatment",
-    values_to = "concordance_category") %>% 
+    values_to = "concordance_category"
+  ) %>% 
   mutate(
     hypothetical_treatment = as.factor(hypothetical_treatment),
     hypothetical_treatment = str_remove(hypothetical_treatment, "concordance_"),
     hypothetical_treatment = str_remove(hypothetical_treatment, "_simple"),
-    concordance_category = as.factor(concordance_category)) %>% 
+    concordance_category = as.factor(concordance_category)
+  ) %>% 
   filter(!is.na(concordance_category)) %>% 
   group_by(study_id, mrn, patient_name) %>% 
   pivot_longer(
     death_date:mechanical_air_in_circuit,
     names_to = "complication",
-    values_to = "complication_time") %>% 
-  # filtering to include only complications that occurred after the particular lab was drawn, retaining NA complication_time as those mean complications did not occur
-  filter(
-    is.na(complication_time) | complication_time > lab_result_time) %>% 
+    values_to = "complication_time"
+  ) %>% 
+  filter(is.na(complication_time) | complication_time > lab_result_time) %>% 
   distinct(study_id, concordance_category) %>% 
   group_by(study_id, mrn) %>% 
   summarise(
     discordance_group = {
       types <- unique(concordance_category)
       discord_types <- setdiff(types, "concordant")
-      
-      if (length(discord_types) == 0) {"concordant"}
-      else if (length(discord_types) == 1) {discord_types}
-      else {"mixed"}},
-    .groups = "drop")
-
-discordance_by_studyid =
-  discordance_by_studyid %>% 
+      if (length(discord_types) == 0) "concordant"
+      else if (length(discord_types) == 1) discord_types
+      else "mixed"
+    },
+    .groups = "drop"
+  ) %>% 
   mutate(discordance_group = as.factor(discordance_group))
 
-# adding discordance_group (one group per patient) back to lab data and nesting it again
-lab_data = 
-  lab_data %>% 
+# add discordance_group back to lab_data and re-nest
+lab_data = lab_data %>% 
   left_join(select(discordance_by_studyid, mrn, discordance_group), by = "mrn")
 
-lab_nest = 
-  lab_data %>% 
-  group_by(mrn, patient_name) %>% nest(data = c(lab_result_time:discordance_group))
+lab_nest = lab_data %>% 
+  group_by(mrn, patient_name) %>% 
+  nest(data = c(lab_result_time:discordance_group))
 
-# merging lab_data and patient_complication_raw AGAIN NOW WITH DISCORDANCE GROUP
-run_labs_complications_raw = 
+# -------------------------------------------------------------------
+# merge AGAIN (now with discordance_group in nested lab data)
+# -------------------------------------------------------------------
+run_labs_complications_raw =
   left_join(lab_nest, patient_run_complication_raw, by = c("mrn","patient_name")) %>% 
   ungroup() %>% 
   mutate(
@@ -371,37 +381,37 @@ run_labs_complications_raw =
     age_years = as.numeric(age_years),
     patient_transported_new = as.factor(patient_transported_new),
     intubated = as.factor(intubated),
-    invasive_ventilation = as.factor(invasive_ventilation)) %>% 
+    invasive_ventilation = as.factor(invasive_ventilation)
+  ) %>% 
   select(study_id, mrn, patient_name, data, everything())
 
-# adding sheet with true ecmo stop time, manually verified by Connie Nguyen June 2025 via medical record review. True stop time assumed to be ELSO stop time if within 4 hours of ELSO stop time. If discrepancy > 4 hours, true stop time defined as that identified by Connie Nguyen
-# not all patients may have a time_off_true as they were not evaluated by Connie if not on heparin
+# -------------------------------------------------------------------
+# add sheet with true ecmo stop time
+# -------------------------------------------------------------------
 stop_time_raw = read_excel("./master_ecmo_QI_2024_7.15.25.xlsx", sheet = "true_ecmo_times") %>% 
   select(-ecmo_start, -`ecmo_stop?`, -Location) %>% 
-  mutate(
-    mrn = as.character(mrn))
-
-run_labs_complications_raw = 
-  left_join(run_labs_complications_raw, stop_time_raw, by = "mrn")
+  mutate(mrn = as.character(mrn))
 
 run_labs_complications_raw =
-  run_labs_complications_raw %>% 
-  rename(
-    time_off_true = true_ecmo_connie) %>% 
+  left_join(run_labs_complications_raw, stop_time_raw, by = "mrn") %>% 
+  rename(time_off_true = true_ecmo_connie) %>% 
   select(study_id, mrn, patient_name, data, time_on, time_off, time_off_true, everything()) %>% 
-  # ensuring that time_off_true incorporates all actual time_off (the earliest identified)
   mutate(
     time_off_true = case_when(
       is.na(time_off_true) ~ time_off,
       time_off > time_off_true ~ time_off_true,
-      TRUE ~ time_off_true)) %>% 
+      TRUE ~ time_off_true
+    )
+  ) %>% 
   unnest(data) %>% 
   group_by(mrn, patient_name) %>%
   filter(lab_result_time >= time_on, lab_result_time <= time_off_true) %>% 
   nest(data = c(lab_result_time:discordance_group)) %>% 
   ungroup()
 
-# adding in complications that were identified by perfusionists during their regular rounding process
+# -------------------------------------------------------------------
+# perfusionist-identified complications
+# -------------------------------------------------------------------
 perfusion_complications =
   read_excel("./master_ecmo_QI_2024_7.15.25.xlsx", sheet = "perfusion_complications") %>%
   janitor::clean_names() %>% 
@@ -411,148 +421,193 @@ perfusion_complications =
     complication = str_to_lower(complication),
     circuit_thrombosis_perfusion = case_when(
       str_detect(complication, "circuit thrombosis | fibrin/clot | fibrin clot | thrombus | clots noted | oxygenator changeout") ~ "circuit thrombosis perfusion",
-      TRUE ~ NA_character_),
+      TRUE ~ NA_character_
+    ),
     air_entrainment_perfusion = case_when(
       str_detect(complication, "air entrainment") ~ "air entrainment perfusion",
-      TRUE ~ NA_character_),
+      TRUE ~ NA_character_
+    ),
     major_bleeding_perfusion = case_when(
       str_detect(complication, "major bleeding") ~ "major bleeding perfusion",
-      TRUE ~ NA_character_),
+      TRUE ~ NA_character_
+    ),
     major_hemolysis_perfusion = case_when(
       str_detect(complication, "major hemolysis") ~ "major hemolysis perfusion",
-      TRUE ~ NA_character_)) %>% 
+      TRUE ~ NA_character_
+    )
+  ) %>% 
   select(-complication, -name) %>% 
   group_by(date, mrn) %>% 
   pivot_longer(
     circuit_thrombosis_perfusion:major_hemolysis_perfusion,
     names_to = "complication",
-    values_to = "perfusion_complication") %>% 
+    values_to = "perfusion_complication"
+  ) %>% 
   drop_na() %>% 
   select(-complication) %>% 
   ungroup() %>% 
-  # keeping only the first instance of any single perfusion-identified complication (e.g. only chronological first instance of thrombosis)
   pivot_wider(
     names_from = perfusion_complication,
     values_from = date,
-    values_fn = list(date = ~min(.x)))
+    values_fn = list(date = ~min(.x))
+  )
 
-# joining with complications identified by perfusion and also ensuring that all lab_result_time is between time_on and time_off_true AND that complications are correctly occurring between time_on and time_off_true
-run_labs_complications_raw = 
+run_labs_complications_raw =
   left_join(run_labs_complications_raw, perfusion_complications, by = "mrn") %>%
   janitor::clean_names() %>% 
   select(study_id, mrn, patient_name, time_on, time_off, time_off_true, patient_id, run_id, data, everything()) %>% 
   unnest(data) %>% 
   filter(lab_result_time >= time_on & lab_result_time <= time_off_true) %>%
   mutate(
-     across(c(death_date:major_hemolysis_perfusion),
-    ~if_else(.x >= time_on & .x <= time_off_true, .x, as.POSIXct(NA)),
-    .names = "{.col}")) %>% 
+    across(
+      c(death_date:major_hemolysis_perfusion),
+      ~ if_else(.x >= time_on & .x <= time_off_true, .x, as.POSIXct(NA)),
+      .names = "{.col}"
+    )
+  ) %>% 
   group_by(mrn, patient_name) %>%
   nest(data = c(lab_result_time:discordance_group)) %>% 
   ungroup() %>% 
   select(study_id, mrn, patient_name, time_on, time_off, time_off_true, patient_id, run_id, data, everything())
 
-# adding nearest total bilirubin to aPTT (as this is the most common anticoagulation lab and therefore we do not want to create information loss) that occurred within 24 hours
-coag_labs = 
-  run_labs_complications_raw %>% unnest(data) %>% 
-  filter(!is.na(activated_partial_thromboplastin_time)) %>% 
-  select(study_id, mrn, lab_result_time, activated_partial_thromboplastin_time)
+# -------------------------------------------------------------------
+# nearest labs within 24h of aPTT: bilirubin_total, platelet, INR
+# -------------------------------------------------------------------
+coag_labs =
+  run_labs_complications_raw %>%
+  unnest(data) %>%
+  filter(!is.na(activated_partial_thromboplastin_time)) %>%
+  select(study_id, mrn, lab_result_time, activated_partial_thromboplastin_time, plasma_free_hemoglobin)
 
-total_bili_labs = 
-  run_labs_complications_raw %>% unnest(data) %>% 
-  filter(!is.na(bilirubin_total)) %>% 
+# bilirubin_total
+total_bili_labs =
+  run_labs_complications_raw %>%
+  unnest(data) %>%
+  filter(!is.na(bilirubin_total)) %>%
   select(study_id, mrn, lab_result_time, bilirubin_total)
 
-coag_bili_matches = fuzzyjoin::fuzzy_left_join(
-  coag_labs,
-  total_bili_labs,
-  by = c("study_id" = "study_id", "lab_result_time" = "lab_result_time"),
-  match_fun = list(`==`, function(x, y) abs(difftime(x, y, units = "hours")) <= 24)) %>%
+coag_bili_closest =
+  fuzzyjoin::fuzzy_left_join(
+    coag_labs,
+    total_bili_labs,
+    by = c("study_id" = "study_id", "lab_result_time" = "lab_result_time"),
+    match_fun = list(`==`, function(x, y) abs(difftime(x, y, units = "hours")) <= 24)
+  ) %>%
   mutate(time_diff = abs(difftime(lab_result_time.x, lab_result_time.y, units = "secs"))) %>%
   group_by(study_id.x, mrn.x, lab_result_time.x) %>%
   slice_min(time_diff, with_ties = FALSE) %>%
-  ungroup()
-
-coag_bili_closest =
-  coag_bili_matches %>%
+  ungroup() %>%
   select(
     study_id = study_id.x,
     mrn = mrn.x,
     lab_result_time = lab_result_time.x,
     nearest_bilirubin = bilirubin_total,
-    bilirubin_time = lab_result_time.y)
+    bilirubin_time = lab_result_time.y
+  )
 
-# adding nearest platelet count within 24 hours of aPTT (mirrors nearest_bilirubin)
-platelet_labs = 
-  run_labs_complications_raw %>% unnest(data) %>% 
+# platelet
+platelet_labs =
+  run_labs_complications_raw %>%
+  unnest(data) %>%
   filter(!is.na(platelet)) %>%
   select(study_id, mrn, lab_result_time, platelet)
 
-coag_platelet_matches = fuzzyjoin::fuzzy_left_join(
-  coag_labs,
-  platelet_labs,
-  by = c("study_id" = "study_id", "lab_result_time" = "lab_result_time"),
-  match_fun = list(`==`, function(x, y) abs(difftime(x, y, units = "hours")) <= 24)
-) %>%
+coag_platelet_closest =
+  fuzzyjoin::fuzzy_left_join(
+    coag_labs,
+    platelet_labs,
+    by = c("study_id" = "study_id", "lab_result_time" = "lab_result_time"),
+    match_fun = list(`==`, function(x, y) abs(difftime(x, y, units = "hours")) <= 24)
+  ) %>%
   mutate(time_diff = abs(difftime(lab_result_time.x, lab_result_time.y, units = "secs"))) %>%
   group_by(study_id.x, mrn.x, lab_result_time.x) %>%
   slice_min(time_diff, with_ties = FALSE) %>%
-  ungroup()
-
-coag_platelet_closest =
-  coag_platelet_matches %>%
+  ungroup() %>%
   select(
     study_id = study_id.x,
     mrn = mrn.x,
     lab_result_time = lab_result_time.x,
     nearest_platelet = platelet,
-    platelet_time = lab_result_time.y)
+    platelet_time = lab_result_time.y
+  )
 
-run_labs_complications_raw = 
-  run_labs_complications_raw %>% 
-  unnest(data) %>% 
-  left_join(coag_bili_closest,     by = c("study_id", "mrn", "lab_result_time")) %>% 
-  left_join(coag_platelet_closest, by = c("study_id", "mrn", "lab_result_time")) %>% 
-  relocate(nearest_bilirubin, bilirubin_time, .after = plasma_free_hemoglobin) %>% 
-  relocate(nearest_platelet,  platelet_time,  .after = bilirubin_time) %>% 
+# INR (international_normalization_ratio)
+inr_labs =
+  run_labs_complications_raw %>%
+  unnest(data) %>%
+  filter(!is.na(international_normalization_ratio)) %>%
+  select(study_id, mrn, lab_result_time, international_normalization_ratio)
+
+coag_inr_closest =
+  fuzzyjoin::fuzzy_left_join(
+    coag_labs,
+    inr_labs,
+    by = c("study_id" = "study_id", "lab_result_time" = "lab_result_time"),
+    match_fun = list(`==`, function(x, y) abs(difftime(x, y, units = "hours")) <= 24)
+  ) %>%
+  mutate(time_diff = abs(difftime(lab_result_time.x, lab_result_time.y, units = "secs"))) %>%
+  group_by(study_id.x, mrn.x, lab_result_time.x) %>%
+  slice_min(time_diff, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(
+    study_id = study_id.x,
+    mrn = mrn.x,
+    lab_result_time = lab_result_time.x,
+    nearest_inr = international_normalization_ratio,
+    inr_time = lab_result_time.y
+  )
+
+# join nearest_* back into nested structure
+run_labs_complications_raw =
+  run_labs_complications_raw %>%
+  unnest(data) %>%
+  left_join(coag_bili_closest,     by = c("study_id", "mrn", "lab_result_time")) %>%
+  left_join(coag_platelet_closest, by = c("study_id", "mrn", "lab_result_time")) %>%
+  left_join(coag_inr_closest,      by = c("study_id", "mrn", "lab_result_time")) %>%
+  relocate(nearest_bilirubin, bilirubin_time, .after = plasma_free_hemoglobin) %>%
+  relocate(nearest_platelet,  platelet_time,  .after = bilirubin_time) %>%
+  relocate(nearest_inr,       inr_time,       .after = platelet_time) %>%
   group_by(mrn, patient_name) %>%
-  nest(data = c(lab_result_time:discordance_group)) %>% 
-  ungroup() %>% 
+  nest(data = c(lab_result_time:discordance_group)) %>%
+  ungroup() %>%
   select(study_id, mrn, patient_name, time_on, time_off, time_off_true, patient_id, run_id, data, everything())
 
-# adding thrombotic and hemorrhagic complications that were identified by manual chart view (Phil Nantawisarakul and Connie Nguyen, Nov 2025)
-## Note that these complications were assessed through 7 days after ECMO stop
-manual_thrombotic_hemorrhage_complications = 
+# -------------------------------------------------------------------
+# manual chart-reviewed thrombosis/bleeding complications (7d window)
+# -------------------------------------------------------------------
+manual_thrombotic_hemorrhage_complications =
   read_excel("./master_ecmo_QI_2024_7.15.25.xlsx", sheet = "manual_thromb_bleeding_comps") %>%
   janitor::clean_names() %>% 
-  mutate(
-    mrn = as.character(mrn))
+  mutate(mrn = as.character(mrn))
 
-# joining thrombotic and hemorrhagic complications that were identified as above to run_labs_complications_raw while also ensuring lab_result_time is within duration of ECMO and that all complications are within 7 days of ECMO stop
-run_labs_complications_raw = 
+run_labs_complications_raw =
   left_join(run_labs_complications_raw, manual_thrombotic_hemorrhage_complications, by = "mrn") %>%
   janitor::clean_names()
 
-run_labs_complications_raw = 
-  run_labs_complications_raw %>% 
-  select(study_id, mrn, patient_name, time_on, time_off, time_off_true, complication_7day_assessment, patient_id, run_id, data, everything()) %>% 
-  unnest(data) %>% 
+run_labs_complications_raw =
+  run_labs_complications_raw %>%
+  select(study_id, mrn, patient_name, time_on, time_off, time_off_true,
+         complication_7day_assessment, patient_id, run_id, data, everything()) %>%
+  unnest(data) %>%
   filter(lab_result_time >= time_on & lab_result_time <= time_off_true) %>%
   mutate(
-     # adding variable which accounts for time elapsed from ECMO start until the lab result time
     duration_to_lab = as.numeric(lab_result_time - time_on, units = "hours"),
     complication_7day_assessment = gsub(" UTC", "", complication_7day_assessment),
-    complication_7day_assessment = lubridate::ymd_hms(complication_7day_assessment)) %>% 
+    complication_7day_assessment = lubridate::ymd_hms(complication_7day_assessment)
+  ) %>%
   mutate(
-     across(c(death_date:ich_based_on_imaging_findings),
-    ~if_else(.x >= time_on & .x <= complication_7day_assessment, .x, as.POSIXct(NA)),
-    .names = "{.col}")) %>% 
-  group_by(mrn, patient_name) %>% 
-  nest(data = c(lab_result_time:discordance_group)) %>% 
-  ungroup() %>% 
-  select(study_id, mrn, patient_name, time_on, time_off, time_off_true, complication_7day_assessment, duration_to_lab, patient_id, run_id, data, everything())
+    across(
+      c(death_date:ich_based_on_imaging_findings),
+      ~ if_else(.x >= time_on & .x <= complication_7day_assessment, .x, as.POSIXct(NA)),
+      .names = "{.col}"
+    )
+  ) %>%
+  group_by(mrn, patient_name) %>%
+  nest(data = c(lab_result_time:discordance_group)) %>%
+  ungroup() %>%
+  select(study_id, mrn, patient_name, time_on, time_off, time_off_true,
+         complication_7day_assessment, duration_to_lab, patient_id, run_id, data, everything())
 ```
-  
 # Methods:
 Only first ECMO run used.
 
@@ -2211,8 +2266,6 @@ ggsurvplot(
 )
 ```
 
-
-
 ---
 
 ## 2.6 Time-varying Cox models with labs captured at the moment discordance is defined
@@ -2246,7 +2299,7 @@ covar_snapshot <- model_fit_complications %>%
   select(
     mrn,
     lab_result_time,
-    international_normalization_ratio,
+    nearest_inr,
     nearest_bilirubin,
     nearest_platelet,
     heparin_infusion_dose_value_units_kg_hr,
@@ -2259,8 +2312,6 @@ covar_snapshot <- model_fit_complications %>%
   group_by(mrn) %>%
   slice_min(time_diff_hours, with_ties = FALSE) %>%
   ungroup()
-  # If you want to restrict to labs within 24 hours of index_time:
-  # %>% filter(time_diff_hours <= 24)
 
 covar_snapshot %>%
   summarise(
@@ -2274,7 +2325,7 @@ covar_snapshot %>%
 cox_covars_indexed <- covar_snapshot %>%
   select(
     mrn,
-    international_normalization_ratio,
+    nearest_inr,
     nearest_bilirubin,
     nearest_platelet,
     heparin_infusion_dose_value_units_kg_hr,
@@ -2289,7 +2340,7 @@ cox_covars_indexed <- covar_snapshot %>%
 tv_thrombosis_indexed <- tv_thrombosis %>%
   left_join(cox_covars_indexed, by = "mrn") %>%
   filter(
-    !is.na(international_normalization_ratio),
+    !is.na(nearest_inr),
     !is.na(nearest_bilirubin),
     !is.na(nearest_platelet),
     !is.na(heparin_infusion_dose_value_units_kg_hr),
@@ -2299,7 +2350,7 @@ tv_thrombosis_indexed <- tv_thrombosis %>%
 tv_bleeding_indexed <- tv_bleeding %>%
   left_join(cox_covars_indexed, by = "mrn") %>%
   filter(
-    !is.na(international_normalization_ratio),
+    !is.na(nearest_inr),
     !is.na(nearest_bilirubin),
     !is.na(nearest_platelet),
     !is.na(heparin_infusion_dose_value_units_kg_hr),
@@ -2320,7 +2371,7 @@ tv_bleeding_indexed %>%
 cox_thromb_indexed <- coxph(
   Surv(start, stop, event) ~
     discord_group +
-    international_normalization_ratio +
+    nearest_inr +
     nearest_bilirubin +
     nearest_platelet +
     heparin_infusion_dose_value_units_kg_hr +
@@ -2346,7 +2397,7 @@ thromb_indexed_results %>%
 cox_bleed_indexed <- coxph(
   Surv(start, stop, event) ~
     discord_group +
-    international_normalization_ratio +
+    nearest_inr +
     nearest_bilirubin +
     nearest_platelet +
     heparin_infusion_dose_value_units_kg_hr +
@@ -2369,20 +2420,6 @@ bleed_indexed_results %>%
     caption = "Time-varying Cox model (bleeding): discordance + labs at time of first discordance"
   )
 ```
-
-### Comments on discrepancy between logistic and survival analyses
-
-- Logistic regression treats discordance as fixed (ever vs never) or at first discordance. Cox regression treats it as time-varying, so:
-
-- If a patient is discordant late, their earlier follow-up counts as “non-exposed” in Cox.
-
-- Logistic regression collapses all follow-up into a single binary exposure.
-
-- Even with post-discordance events only, this leads to different denominators and risk attribution.
-
-**We are likely very underpowered given infrequent events and small discordant subgroups (n = 11 and n = 17) and a time-varying exposure.**
-
-- Ultimately this is exploratory in nature.
 
 # 4. Tertiary outcomes, i.e. those which may not be solely thrombotic or hemorrhagic, but might be associated with discordance - for publication
 
