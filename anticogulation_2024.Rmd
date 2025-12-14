@@ -2273,54 +2273,85 @@ ggsurvplot(
 Here we:
 
 - Define an **index time** per patient:
-  - `first_discord_time` if they ever become discordant,  
-  - otherwise `time_on`.
-- Grab the **nearest lab row** in `model_fit_complications` to that index time (you can cap at 24 hours if you want).
-- Merge those covariates into the **time-varying** datasets and fit Cox models.
+    - if discordant: first_discord_time
+    - else (always concordant): first paired aPTT/anti-Xa lab_result_time
 
-```{r survival_index_covariates, echo = FALSE, warning = FALSE}
+```{r}
 ###############################################################################
-# 1. Index time per patient: first discordance or ECMO start
+# 1. Index time per patient:
+#    - if discordant: first_discord_time
+#    - else (always concordant): first paired aPTT/anti-Xa lab_result_time
 ###############################################################################
+
+# first paired aPTT/anti-Xa timestamp for everyone who has any paired labs
+first_paired_coag_time <- model_fit_data %>%
+  group_by(mrn) %>%
+  summarise(first_paired_time = min(lab_result_time, na.rm = TRUE), .groups = "drop") %>%
+  mutate(first_paired_time = lubridate::force_tz(first_paired_time, "UTC"))
+
+# define index time using discordance time if present, otherwise first paired time
 index_times <- surv_base %>%
-  mutate(
-    index_time = dplyr::if_else(
-      !is.na(first_discord_time),
-      first_discord_time,
-      time_on
-    )
-  ) %>%
-  select(mrn, index_time)
+  left_join(first_paired_coag_time, by = "mrn") %>%
+  transmute(
+    mrn,
+    index_time = dplyr::coalesce(first_discord_time, first_paired_time)
+  )
 
 ###############################################################################
-# 2. Nearest covariate snapshot at index time (from model_fit_complications)
+# 2. Build a long covariate table using COVARIATE-SPECIFIC timestamps
+#    (inr_time, bilirubin_time, platelet_time, + dose_time)
 ###############################################################################
-covar_snapshot <- model_fit_complications %>%
+covar_long <- model_fit_complications %>%
   select(
     mrn,
     lab_result_time,
-    nearest_inr,
-    nearest_bilirubin,
-    nearest_platelet,
-    heparin_infusion_dose_value_units_kg_hr,
-    weight
+    weight,
+    nearest_inr, inr_time,
+    nearest_bilirubin, bilirubin_time,
+    nearest_platelet, platelet_time,
+    heparin_infusion_dose_value_units_kg_hr
   ) %>%
-  inner_join(index_times, by = "mrn") %>%
+  mutate(dose_time = lab_result_time) %>%
+  pivot_longer(
+    cols = c(nearest_inr, nearest_bilirubin, nearest_platelet, heparin_infusion_dose_value_units_kg_hr),
+    names_to = "covariate",
+    values_to = "value"
+  ) %>%
   mutate(
-    time_diff_hours = abs(as.numeric(difftime(lab_result_time, index_time, units = "hours")))
+    cov_time = case_when(
+      covariate == "nearest_inr" ~ inr_time,
+      covariate == "nearest_bilirubin" ~ bilirubin_time,
+      covariate == "nearest_platelet" ~ platelet_time,
+      covariate == "heparin_infusion_dose_value_units_kg_hr" ~ dose_time,
+      TRUE ~ as.POSIXct(NA)
+    )
   ) %>%
-  group_by(mrn) %>%
+  select(mrn, covariate, value, cov_time, weight) %>%
+  filter(!is.na(value), !is.na(cov_time)) %>%
+  distinct()
+
+###############################################################################
+# 3. For each patient AND EACH covariate, select the nearest value to index_time
+#    (optional window; keep at 24h to match your design)
+###############################################################################
+covar_indexed_long <- covar_long %>%
+  inner_join(index_times, by = "mrn") %>%
+  mutate(time_diff_hours = abs(as.numeric(difftime(cov_time, index_time, units = "hours")))) %>%
+  filter(time_diff_hours <= 24) %>%   # <-- adjust if you want
+  group_by(mrn, covariate) %>%
   slice_min(time_diff_hours, with_ties = FALSE) %>%
   ungroup()
 
-covar_snapshot %>%
-  summarise(
-    n_patients_with_covars = n_distinct(mrn),
-    median_time_diff_hours = median(time_diff_hours, na.rm = TRUE),
-    max_time_diff_hours    = max(time_diff_hours, na.rm = TRUE)
-  ) %>%
-  knitr::kable(digits = 2,
-               caption = "Time difference (hours) between index time and matched lab per patient")
+###############################################################################
+# 4. Wide covariate snapshot for Cox adjustment
+###############################################################################
+covar_snapshot <- covar_indexed_long %>%
+  select(mrn, covariate, value) %>%
+  pivot_wider(names_from = covariate, values_from = value) %>%
+  left_join(
+    covar_long %>% group_by(mrn) %>% summarise(weight = first(weight), .groups = "drop"),
+    by = "mrn"
+  )
 
 cox_covars_indexed <- covar_snapshot %>%
   select(
@@ -2331,6 +2362,58 @@ cox_covars_indexed <- covar_snapshot %>%
     heparin_infusion_dose_value_units_kg_hr,
     weight
   )
+
+###############################################################################
+# 5. Quick summary: how close were the matched covariates to index time?
+###############################################################################
+covar_indexed_long %>%
+  mutate(
+    covariate = recode(
+      covariate,
+      nearest_inr = "INR",
+      nearest_bilirubin = "Bilirubin",
+      nearest_platelet = "Platelet",
+      heparin_infusion_dose_value_units_kg_hr = "Heparin dose"
+    )
+  ) %>%
+  group_by(covariate) %>%
+  summarise(
+    n_patients = n_distinct(mrn),
+    median_time_h = median(time_diff_hours, na.rm = TRUE),
+    p95_time_h = quantile(time_diff_hours, 0.95, na.rm = TRUE),
+    max_time_h = max(time_diff_hours, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(digits = 2, caption = "Time distance (hours) between index time and covariate values used for Cox adjustment")
+```
+
+```{r}
+###############################################################################
+# Audit: MRNs where nearest covariate is far from index_time
+###############################################################################
+mrns_over_48h <- covar_long %>%
+  inner_join(index_times, by = "mrn") %>%
+  mutate(time_diff_hours = abs(as.numeric(difftime(cov_time, index_time, units = "hours")))) %>%
+  group_by(mrn, covariate) %>%
+  slice_min(time_diff_hours, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(time_diff_hours > 48) %>%
+  mutate(
+    covariate = recode(
+      covariate,
+      nearest_inr = "INR",
+      nearest_bilirubin = "Bilirubin",
+      nearest_platelet = "Platelet",
+      heparin_infusion_dose_value_units_kg_hr = "Heparin dose"
+    )
+  ) %>%
+  arrange(desc(time_diff_hours))
+
+# Wide view (one row per MRN)
+mrns_over_48h %>%
+  select(mrn, covariate, time_diff_hours) %>%
+  pivot_wider(names_from = covariate, values_from = time_diff_hours) %>%
+  knitr::kable(digits = 2, caption = "Patients with covariate time gap > 48h (nearest per covariate to index_time)")
 ```
 
 ```{r survival_tv_indexed_cox, echo = FALSE, warning = FALSE}
