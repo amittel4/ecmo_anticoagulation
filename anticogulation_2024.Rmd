@@ -2448,6 +2448,31 @@ tv_bleeding_indexed %>%
   count(discord_group) %>%
   knitr::kable(caption = "Bleeding TV data: intervals by discordance group (with indexed labs)")
 
+# building df with 
+# - n_patients: unique MRNs with non-missing for that variable
+# - n_total: unique MRNs included in the Cox dataset (after your filters)
+term_patient_n <- function(df, covars, exposure_term = "discord_group") {
+
+  n_total <- df %>% distinct(mrn) %>% nrow()
+
+  # N for exposure (discord_group): everyone in the dataset has it
+  out_exposure <- tibble(
+    term = exposure_term,
+    n_patients = n_total,
+    n_total = n_total
+  )
+
+out_covars <- purrr::map_dfr(covars, function(v) {
+    tibble(
+      term = v,
+      n_patients = df %>% filter(!is.na(.data[[v]])) %>% distinct(mrn) %>% nrow(),
+      n_total = n_total
+    )
+  })
+
+  bind_rows(out_exposure, out_covars)
+}
+
 ###############################################################################
 # 4. Time-varying Cox models
 ###############################################################################
@@ -2464,17 +2489,33 @@ cox_thromb_indexed <- coxph(
   na.action = na.exclude
 )
 
+covars <- c(
+  "nearest_inr",
+  "nearest_bilirubin",
+  "nearest_platelet",
+  "heparin_infusion_dose_value_units_kg_hr",
+  "weight"
+)
+
+n_thromb_terms <- term_patient_n(tv_thrombosis_indexed, covars)
+
 thromb_indexed_results <- broom::tidy(
   cox_thromb_indexed,
   exponentiate = TRUE,
   conf.int = TRUE
 ) %>%
-  mutate(HR = estimate, .keep = "unused")
+  left_join(n_thromb_terms, by = "term") %>%
+  mutate(
+    n_patients = dplyr::coalesce(n_patients, n_total),  # for factor levels like discord_groupaPTT...
+    n_display  = paste0(n_patients, " / ", n_total)
+  ) %>%
+  mutate(HR = estimate, .keep = "unused") %>%
+  relocate(n_display, .after = term)
 
 thromb_indexed_results %>%
   knitr::kable(
     digits = 3,
-    caption = "Time-varying Cox model (thrombosis): discordance + labs at time of first discordance"
+    caption = "Time-varying Cox model (thrombosis): HR with N patients contributing per term (n / total)"
   )
 
 cox_bleed_indexed <- coxph(
@@ -2490,19 +2531,44 @@ cox_bleed_indexed <- coxph(
   na.action = na.exclude
 )
 
+n_bleed_terms <- term_patient_n(tv_bleeding_indexed, covars)
+
 bleed_indexed_results <- broom::tidy(
   cox_bleed_indexed,
   exponentiate = TRUE,
   conf.int = TRUE
 ) %>%
-  mutate(HR = estimate, .keep = "unused")
+  left_join(n_bleed_terms, by = "term") %>%
+  mutate(
+    n_patients = dplyr::coalesce(n_patients, n_total),
+    n_display  = paste0(n_patients, " / ", n_total)
+  ) %>%
+  mutate(HR = estimate, .keep = "unused") %>%
+  relocate(n_display, .after = term)
 
 bleed_indexed_results %>%
   knitr::kable(
     digits = 3,
-    caption = "Time-varying Cox model (bleeding): discordance + labs at time of first discordance"
+    caption = "Time-varying Cox model (bleeding): HR with N patients contributing per term (n / total)"
   )
 ```
+
+Notes:
+109 patients in CPH models (of 113 total patients)
+- missing INR = 3
+- missing platelet = 1
+
+“Robust standard errors clustered by patient were used to account for within-patient correlation.”
+
+# REGRESSION DIAGNOSTICS
+
+## Proportional Hazards Assumption
+
+## Influence / outliers (DFBETA)
+
+## Martingale residuals (functional form check)
+
+## Event per variable (EPV) / model stability
 
 # 4. Tertiary outcomes, i.e. those which may not be solely thrombotic or hemorrhagic, but might be associated with discordance - for publication
 
