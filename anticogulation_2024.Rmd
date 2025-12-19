@@ -2476,6 +2476,21 @@ out_covars <- purrr::map_dfr(covars, function(v) {
 ###############################################################################
 # 4. Time-varying Cox models
 ###############################################################################
+cox_thrombosis_univariable <- coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    cluster(mrn),
+  data = tv_thrombosis_indexed,
+  na.action = na.exclude)
+
+cox_thrombosis_univariable%>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+  mutate(HR = estimate, .keep = "unused") %>% 
+  mutate(
+  p_fdr  = p.adjust(p.value, method = "fdr"),
+  p_holm = p.adjust(p.value, method = "holm"),
+  p_bonf = p.adjust(p.value, method = "bonferroni")) %>% 
+  kable(caption = "Time-varying Cox model (thrombosis), univariable")
+
 cox_thromb_indexed <- coxph(
   Surv(start, stop, event) ~
     discord_group +
@@ -2484,6 +2499,16 @@ cox_thromb_indexed <- coxph(
     nearest_platelet +
     heparin_infusion_dose_value_units_kg_hr +
     weight +
+    cluster(mrn),
+  data = tv_thrombosis_indexed,
+  na.action = na.exclude
+)
+
+cox_thrombosis_simple = coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_platelet +
     cluster(mrn),
   data = tv_thrombosis_indexed,
   na.action = na.exclude
@@ -2510,13 +2535,33 @@ thromb_indexed_results <- broom::tidy(
     n_display  = paste0(n_patients, " / ", n_total)
   ) %>%
   mutate(HR = estimate, .keep = "unused") %>%
-  relocate(n_display, .after = term)
+  relocate(n_display, .after = term) %>% 
+  mutate(
+  p_fdr  = p.adjust(p.value, method = "fdr"),
+  p_holm = p.adjust(p.value, method = "holm"),
+  p_bonf = p.adjust(p.value, method = "bonferroni"))
 
 thromb_indexed_results %>%
   knitr::kable(
     digits = 3,
     caption = "Time-varying Cox model (thrombosis): HR with N patients contributing per term (n / total)"
   )
+
+cox_bleed_univariable <- coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    cluster(mrn),
+  data = tv_bleeding_indexed,
+  na.action = na.exclude
+)
+
+cox_bleed_univariable  %>% broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>% 
+  mutate(HR = estimate, .keep = "unused") %>% 
+  mutate(
+  p_fdr  = p.adjust(p.value, method = "fdr"),
+  p_holm = p.adjust(p.value, method = "holm"),
+  p_bonf = p.adjust(p.value, method = "bonferroni")) %>% 
+  kable(caption = "Time-varying Cox model (hemorrhage), univariable")
 
 cox_bleed_indexed <- coxph(
   Surv(start, stop, event) ~
@@ -2526,6 +2571,16 @@ cox_bleed_indexed <- coxph(
     nearest_platelet +
     heparin_infusion_dose_value_units_kg_hr +
     weight +
+    cluster(mrn),
+  data = tv_bleeding_indexed,
+  na.action = na.exclude
+)
+
+cox_bleed_simple = coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_platelet +
     cluster(mrn),
   data = tv_bleeding_indexed,
   na.action = na.exclude
@@ -2544,31 +2599,205 @@ bleed_indexed_results <- broom::tidy(
     n_display  = paste0(n_patients, " / ", n_total)
   ) %>%
   mutate(HR = estimate, .keep = "unused") %>%
-  relocate(n_display, .after = term)
+  relocate(n_display, .after = term) %>% 
+  mutate(
+  p_fdr  = p.adjust(p.value, method = "fdr"),
+  p_holm = p.adjust(p.value, method = "holm"),
+  p_bonf = p.adjust(p.value, method = "bonferroni"))
 
 bleed_indexed_results %>%
   knitr::kable(
     digits = 3,
     caption = "Time-varying Cox model (bleeding): HR with N patients contributing per term (n / total)"
   )
+
+cox_bleed_simple %>% broom::tidy(
+  exponentiate = TRUE,
+  conf.int = TRUE) %>% 
+  left_join(n_bleed_terms, by = "term") %>%
+  mutate(
+    n_patients = dplyr::coalesce(n_patients, n_total),
+    n_display  = paste0(n_patients, " / ", n_total)
+  ) %>%
+  mutate(HR = estimate, .keep = "unused") %>%
+  relocate(n_display, .after = term) %>% 
+  mutate(
+  p_fdr  = p.adjust(p.value, method = "fdr"),
+  p_holm = p.adjust(p.value, method = "holm"),
+  p_bonf = p.adjust(p.value, method = "bonferroni"))
 ```
 
 Notes:
-109 patients in CPH models (of 113 total patients)
+**109 patients in CPH models (of 113 total patients)**
 - missing INR = 3
 - missing platelet = 1
 
-“Robust standard errors clustered by patient were used to account for within-patient correlation.”
+**“Robust standard errors clustered by patient were used to account for within-patient correlation.”**
+
+**Limitations include few hemorrhage events. Thus, risk of type 1 error when interpreting individual terms. Hazard ratios are imprecise**
 
 # REGRESSION DIAGNOSTICS
+*** working ***
 
 ## Proportional Hazards Assumption
+```{r}
+ph_test_thromb <- cox.zph(cox_thromb_indexed)
+ph_test_bleed  <- cox.zph(cox_bleed_indexed)
+
+ph_test_thromb
+ph_test_bleed
+
+plot(ph_test_thromb)
+plot(ph_test_bleed)
+```
+
+How to interpret (exploratory framing)
+
+Global test p > 0.05 → no strong evidence PH violated
+
+Term-level p < 0.05 → possible time-varying effect
+
+Mild violations are acceptable in exploratory analyses if acknowledged
+
+**No strong global violations of the proportional hazards assumption were observed with either model as assessed with Schoenfeld residuals. In the hemorrhage model, INR demonstrated mild non-proportionally (chi square 4.427, p = 0.035), hazard ratios should therefore be interpreted for this covariable as time-averaged effects.**
+
+(i.e. INR impact is a blend of effects over time, and is not always equal throughout the time on ECMO)
+
+## Multicollinearity
+_need to fit model without clustering_
+_model with max covariables checked_
+```{r}
+library(car)
+
+# thrombosis
+cox_thrombosis_nocluster <- coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_bilirubin +
+    nearest_platelet +
+    heparin_infusion_dose_value_units_kg_hr +
+    weight,
+  data = tv_thrombosis_indexed)
+
+vif(cox_thrombosis_nocluster)
+
+# hemorrhage
+cox_bleed_nocluster <- coxph(
+  Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_bilirubin +
+    nearest_platelet +
+    heparin_infusion_dose_value_units_kg_hr +
+    weight,
+  data = tv_bleeding_indexed)
+
+vif(cox_bleed_nocluster)
+```
+
+**VIF ≈ 1–2 → no concern**
 
 ## Influence / outliers (DFBETA)
+```{r}
+# thrombosis
+dfb <- residuals(cox_thromb_indexed, type = "dfbeta")
 
-## Martingale residuals (functional form check)
+# Max influence per term
+apply(abs(dfb), 2, max)
+
+matplot(abs(dfb), type = "l", lty = 1,
+        ylab = "|DFBETA|", xlab = "Observation index")
+abline(h = 0.5, col = "red", lty = 2)
+
+# hemorrhage
+dfb <- residuals(cox_bleed_indexed, type = "dfbeta")
+
+# Max influence per term
+apply(abs(dfb), 2, max)
+
+matplot(abs(dfb), type = "l", lty = 1,
+        ylab = "|DFBETA|", xlab = "Observation index")
+abline(h = 0.5, col = "red", lty = 2)
+```
+
+Interpretation
+
+|DFBETA| > ~0.5 suggests influential individuals
+
+## Martingale residuals
+```{r}
+# thrombosis
+mart <- residuals(cox_thromb_indexed, type = "martingale")
+
+plot(tv_thrombosis_indexed$nearest_inr, mart)
+loess_fit <- loess(mart ~ tv_thrombosis_indexed$nearest_inr)
+lines(tv_thrombosis_indexed$nearest_inr, fitted(loess_fit), col="red")
+
+plot(tv_thrombosis_indexed$nearest_bilirubin, mart)
+loess_fit <- loess(mart ~ tv_thrombosis_indexed$nearest_bilirubin)
+lines(tv_thrombosis_indexed$nearest_bilirubin, fitted(loess_fit), col="red")
+
+plot(tv_thrombosis_indexed$nearest_platelet, mart)
+loess_fit <- loess(mart ~ tv_thrombosis_indexed$nearest_platelet)
+lines(tv_thrombosis_indexed$nearest_platelet, fitted(loess_fit), col="red")
+
+plot(tv_thrombosis_indexed$heparin_infusion_dose_value_units_kg_hr, mart)
+loess_fit <- loess(mart ~ tv_thrombosis_indexed$heparin_infusion_dose_value_units_kg_hr)
+lines(tv_thrombosis_indexed$heparin_infusion_dose_value_units_kg_hr, fitted(loess_fit), col="red")
+
+plot(tv_thrombosis_indexed$weight, mart)
+loess_fit <- loess(mart ~ tv_thrombosis_indexed$weight)
+lines(tv_thrombosis_indexed$weight, fitted(loess_fit), col="red")
+
+plot(tv_thrombosis_indexed$heparin_infusion_dose_value_units_kg_hr, mart)
+loess_fit <- loess(mart ~ tv_thrombosis_indexed$heparin_infusion_dose_value_units_kg_hr)
+lines(tv_thrombosis_indexed$heparin_infusion_dose_value_units_kg_hr, fitted(loess_fit), col="red")
+
+# hemorrhage
+mart <- residuals(cox_bleed_indexed, type = "martingale")
+
+plot(tv_bleeding_indexed$nearest_inr, mart)
+loess_fit <- loess(mart ~ tv_bleeding_indexed$nearest_inr)
+lines(tv_bleeding_indexed$nearest_inr, fitted(loess_fit), col="red")
+
+plot(tv_bleeding_indexed$nearest_bilirubin, mart)
+loess_fit <- loess(mart ~ tv_bleeding_indexed$nearest_bilirubin)
+lines(tv_bleeding_indexed$nearest_bilirubin, fitted(loess_fit), col="red")
+
+plot(tv_bleeding_indexed$nearest_platelet, mart)
+loess_fit <- loess(mart ~ tv_bleeding_indexed$nearest_platelet)
+lines(tv_bleeding_indexed$nearest_platelet, fitted(loess_fit), col="red")
+
+plot(tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr, mart)
+loess_fit <- loess(mart ~ tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr)
+lines(tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr, fitted(loess_fit), col="red")
+
+plot(tv_bleeding_indexed$weight, mart)
+loess_fit <- loess(mart ~ tv_bleeding_indexed$weight)
+lines(tv_bleeding_indexed$weight, fitted(loess_fit), col="red")
+
+plot(tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr, mart)
+loess_fit <- loess(mart ~ tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr)
+lines(tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr, fitted(loess_fit), col="red")
+```
 
 ## Event per variable (EPV) / model stability
+```{r}
+# thrombosis
+n_events <- sum(tv_thrombosis_indexed$event)
+n_vars   <- length(coef(cox_thromb_indexed))
+
+n_events / n_vars
+
+# bleeding
+n_events <- sum(tv_bleeding_indexed$event)
+n_vars   <- length(coef(cox_bleed_indexed))
+
+n_events / n_vars
+```
+
+**Limitation: we have relatively few bleeding events. Thus hazard ratios are imprecise and should be interpreted cautiously.**
 
 # 4. Tertiary outcomes, i.e. those which may not be solely thrombotic or hemorrhagic, but might be associated with discordance - for publication
 
