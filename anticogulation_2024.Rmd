@@ -2080,7 +2080,7 @@ ggsurvplot(
 
 ## 2.4 Time-varying exposure: everyone starts concordant, then switches at first discordance
 
-```{r survival_tv_build, echo = FALSE, warning = FALSE}
+```{r survival_tv_build, echo = TRUE, warning = FALSE}
 ###############################################################################
 # Build time-varying data:
 #  - Time scale: days since ECMO cannulation (time_on)
@@ -2133,7 +2133,8 @@ build_tvd <- function(df, event_time_var) {
 
         # ensure disc time is slightly > 0 if extremely early
         if (!is.na(t_disc_days)) {
-          t_disc_days <- max(t_disc_days, 1e-6)
+          min_gap_days <- 1/1440
+          t_disc_days <- max(t_disc_days, min_gap_days)
         }
 
         if (t_final_days <= 0) {
@@ -2222,7 +2223,7 @@ tv_bleeding %>%
 ```
 
 ## 2.5 KM curves with time-varying discordance
-```{r survival_tv_km, echo = FALSE, warning = FALSE}
+```{r survival_tv_km, echo = TRUE, warning = FALSE}
 # --- Thrombosis (time-varying discordance) ---
 fit_throm_tv <- survfit(
   Surv(start, stop, event) ~ discord_group,
@@ -2266,7 +2267,181 @@ ggsurvplot(
 )
 ```
 
----
+## Reason why number at risk is mis-counting patients
+This is not a bug in your build_tvd() — it’s a quirk/limitation of how survfit() computes n.risk at exact cutpoints for multi-state/time-dependent strata (and then ggsurvplot() faithfully prints it).
+
+In other words:
+
+Your data: everyone concordant at time 0 ✅
+
+survfit(summary, times=0): internally classifies some people as discordant at 0 ❌
+
+Your plotted risk table: prints that internal n.risk ❌
+
+Why survfit() does this
+
+It’s almost always an endpoint convention problem with start–stop intervals at t = 0 combined with stratum assignment.
+
+Even though your discordant intervals start at t_disc_days = 1 minute, survfit()’s internal machinery for n.risk at an exact timepoint can behave like:
+
+include intervals with start <= t and include strata membership for subjects who have a later interval beginning “almost immediately”
+
+OR it uses a subject-level “current stratum at t” routine that’s not robust at t=0 when subjects have multiple rows
+
+The giveaway is that the “discordant-at-0” counts are smaller than the ever-discordant counts (8/10 vs 16/19). That screams: “some early-switchers are being classified as discordant at t=0 by the risk-set routine.”
+
+## The fix:
+## 2.5.1 - time varying KM plots w custom risk tables which accurately capture number at risk
+```{r}
+###############################################################################
+# Time-varying KM + CUSTOM (correct) risk table as ONE combined figure (HTML)
+# - Computes risk counts from start/stop data: start <= t < stop, distinct MRN
+# - Renders risk table as a ggplot and stacks under KM plot using patchwork
+###############################################################################
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(patchwork)
+
+#----------------------------
+# 1) Build correct risk counts
+#----------------------------
+make_tv_risk_long <- function(tv, times = seq(0, 40, 5),
+                              id = "mrn", strata = "discord_group",
+                              start = "start", stop = "stop") {
+
+  lvls <- levels(tv[[strata]])
+  if (is.null(lvls)) lvls <- sort(unique(as.character(tv[[strata]])))
+
+  expand_grid(time = times, tmp_group = lvls) %>%
+    rowwise() %>%
+    mutate(
+      n_risk = {
+        t <- time
+        g <- tmp_group
+        tv %>%
+          filter(.data[[start]] <= t, .data[[stop]] > t, as.character(.data[[strata]]) == g) %>%
+          distinct(.data[[id]]) %>%
+          nrow()
+      }
+    ) %>%
+    ungroup() %>%
+    transmute(
+      time = as.numeric(time),
+      discord_group = factor(tmp_group, levels = lvls),
+      n_risk = n_risk
+    )
+}
+
+#----------------------------
+# 2) Risk table plot (ggplot)
+#----------------------------
+make_risk_table_plot <- function(risk_long,
+                                 times = sort(unique(risk_long$time)),
+                                 xlab = "Days since ECMO cannulation",
+                                 title = "Number at risk (time-varying exposure)",
+                                 text_size = 4) {
+
+  if (any(is.na(risk_long$discord_group))) {
+    stop("Risk table strata are NA. Check discord_group labels/levels.")
+  }
+
+  ggplot(risk_long, aes(x = time, y = discord_group)) +
+    geom_tile(fill = "white", color = "grey85", linewidth = 0.4, height = 0.95) +
+    geom_text(aes(label = n_risk), size = text_size) +
+    scale_x_continuous(breaks = times, limits = range(times)) +
+    labs(x = NULL, y = NULL, title = title) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(size = 13, face = "plain"),
+      axis.text.y = element_text(size = 11),
+      axis.text.x = element_text(size = 11),
+      panel.grid = element_blank(),
+      legend.position = "none",
+      plot.margin = margin(2, 5, 5, 5)
+    )
+}
+
+#----------------------------
+# 3) One function to make the combined figure
+#----------------------------
+make_tv_km_with_custom_risktable <- function(tv, event_label = "Outcome",
+                                            times = seq(0, 40, 5),
+                                            xlab = "Days since ECMO cannulation",
+                                            km_height = 3.2, rt_height = 1.2,
+                                            pretty_labels = TRUE) {
+
+  # Safe label cleanup (no recode() dependency)
+  if (pretty_labels) {
+    tv <- tv %>%
+      mutate(discord_group = as.character(discord_group)) %>%
+      mutate(discord_group = case_when(
+        discord_group == "aPTT > antiXa" ~ "aPTT > anti-Xa",
+        discord_group == "aPTT < antiXa" ~ "aPTT < anti-Xa",
+        TRUE ~ discord_group
+      )) %>%
+      mutate(discord_group = factor(discord_group,
+                                    levels = c("concordant", "aPTT > anti-Xa", "aPTT < anti-Xa")))
+  }
+
+  # Fit KM (counting process) and make KM plot WITHOUT survminer risk table
+  fit_tv <- survfit(Surv(start, stop, event) ~ discord_group, data = tv)
+
+  # CLEAN LEGEND LABELS
+  names(fit_tv$strata) <- gsub("^discord_group=", "", names(fit_tv$strata))
+
+  g <- ggsurvplot(
+    fit_tv,
+    data = tv,
+    conf.int = FALSE,
+    break.time.by = diff(times)[1],
+    xlab = xlab,
+    title = paste0("Time-Varying KM: ", event_label),
+    risk.table = FALSE
+  )
+
+  km_plot <- g$plot +
+    scale_x_continuous(breaks = times, limits = range(times))
+
+  # Build correct risk table and plot it
+  risk_long <- make_tv_risk_long(tv, times = times)
+  rt_plot <- make_risk_table_plot(
+    risk_long,
+    times = times,
+    xlab = xlab,
+    title = "Number at risk (time-varying exposure)",
+    text_size = 4
+  ) +
+    scale_x_continuous(breaks = times, limits = range(times))
+
+  (km_plot / rt_plot) + plot_layout(heights = c(km_height, rt_height))
+}
+
+#----------------------------
+# 4) Run for BOTH outcomes (prints two combined figures)
+#----------------------------
+times <- seq(0, 40, 5)
+
+# Thrombosis combined figure
+make_tv_km_with_custom_risktable(
+  tv = tv_thrombosis,
+  event_label = "Thrombosis",
+  times = times,
+  xlab = "Days since ECMO cannulation"
+)
+
+# Bleeding combined figure
+make_tv_km_with_custom_risktable(
+  tv = tv_bleeding,
+  event_label = "Bleeding",
+  times = times,
+  xlab = "Days since ECMO cannulation"
+)
+```
+
 
 ## 2.6 Time-varying Cox models with labs captured at the moment discordance is defined
 
