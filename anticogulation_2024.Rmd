@@ -2816,11 +2816,20 @@ Notes:
 
 ## Proportional Hazards Assumption
 ```{r}
+ph_test_univariable_thromb <- cox.zph(cox_thrombosis_univariable)
+ph_test_univariable_bleed <- cox.zph(cox_bleed_univariable)
+
 ph_test_thromb <- cox.zph(cox_thromb_indexed)
 ph_test_bleed  <- cox.zph(cox_bleed_indexed)
 
+ph_test_univariable_thromb
+ph_test_univariable_bleed
+
 ph_test_thromb
 ph_test_bleed
+
+plot(ph_test_univariable_thromb)
+plot(ph_test_univariable_bleed)
 
 plot(ph_test_thromb)
 plot(ph_test_bleed)
