@@ -1114,8 +1114,6 @@ Interpreting:
 
 # Patient-Level Demographics, based on development of any discordance
 
-**Note that one patient with both discordance groups is included in this analysis. This patient's first discordance type was "aPTT < antiXa"**
-
 ```{r patient-level demographics, echo=FALSE, warning=FALSE}
 ###############################################################################
 # 1. Assign patient-level discordance categories
@@ -1173,6 +1171,9 @@ patient_demographics <- model_fit_data %>%
     mode            = dplyr::first(mode),
 
     # pump & labs (already in your original code)
+    membrane_lung = dplyr::first(membrane_lung),
+    pump = dplyr::first(pump),
+    temperature_regulation = dplyr::first(temperature_regulation),
     pump_flow4  = median(pump_flow4, na.rm = TRUE),
     pump_flow24 = median(pump_flow24, na.rm = TRUE),
 
@@ -1205,14 +1206,9 @@ patient_level_data <- left_join(patient_demographics,
                                  by = "mrn") %>% 
   drop_na(discord_group)
 
-###############################################################################
-# 3. Produce group-level summaries
-###############################################################################
-
-group_summary <- patient_level_data %>%
-    group_by(discord_group) %>%
-    summarise(
-        n_patients = n(),
+patient_demographics %>% 
+  summarise(
+    n_patients = n(),
         median_age = median(age_years, na.rm = TRUE),
         iqr_age = IQR(age_years, na.rm = TRUE),
         male_pct = mean(sex == "Male", na.rm = TRUE) * 100,
@@ -1248,6 +1244,59 @@ group_summary <- patient_level_data %>%
         median_hep_dose =
             median(heparin_infusion_dose_value_units_kg_hr, na.rm=TRUE),
         iqr_hep_dose = IQR(heparin_infusion_dose_value_units_kg_hr,na.rm=TRUE),
+        median_pump_flow4 = median(pump_flow4, na.rm = TRUE),
+        iqr_pump_flow4 = IQR(pump_flow4, na.rm = TRUE),
+        median_pump_flow24 = median(pump_flow24, na.rm = TRUE),
+        iqr_pump_flow24 = IQR(pump_flow24, na.rm = TRUE),  
+        .groups = "drop") %>% kable(digits = 2, caption = "overall summary")
+  
+###############################################################################
+# 3. Produce group-level summaries
+###############################################################################
+  
+group_summary <- patient_level_data %>%
+    group_by(discord_group) %>%
+    summarise(
+        # n_patients = n(),
+        median_age = median(age_years, na.rm = TRUE),
+        iqr_age = IQR(age_years, na.rm = TRUE),
+        male_pct = mean(sex == "Male", na.rm = TRUE) * 100,
+        median_wt = median(weight, na.rm = TRUE),
+        iqr_wt = IQR(weight, na.rm = TRUE),
+        median_ht = median(height, na.rm = TRUE),
+        iqr_ht = IQR(height, na.rm = TRUE),
+        median_hours = median(hours_ecmo, na.rm = TRUE),
+        iqr_hours = IQR(hours_ecmo, na.rm = TRUE),
+        cticu_pct = mean(department_name == "MIL 5 CTICU" | department_name == "GBG 4 W CT ICU", na.rm=TRUE)*100,
+        ccu_pct   = mean(department_name == "MIL 5 CCU" | department_name == "HRT CARDIAC CARE", na.rm=TRUE)*100,
+        micu_pct = mean(department_name == "MIL 4 MICU A", na.rm=TRUE)*100,
+        otherloc_pct = mean(department_name == "MIL 4 SICU" | department_name == "MIL OPERATING ROOM" | department_name == "MIL CARDIAC CATH", na.rm=TRUE)*100,
+        vv_pct = mean(mode == "VV", na.rm=TRUE)*100,
+        va_pct = mean(mode == "VA", na.rm=TRUE)*100,
+        male_pct = mean(sex == "Male", na.rm=TRUE)*100,
+        female_pct = mean(sex == "Female",na.rm=TRUE)*100,
+        median_aptt =
+            median(activated_partial_thromboplastin_time, na.rm=TRUE),
+        iqr_appt = IQR(activated_partial_thromboplastin_time, na.rm=TRUE),
+        median_antixa =
+            median(heparin_assay_quantitative, na.rm=TRUE),
+        iqr_antixa = IQR(heparin_assay_quantitative,na.rm=TRUE),
+        median_inr =
+            median(international_normalization_ratio, na.rm=TRUE),
+        iqr_inr = IQR(international_normalization_ratio,na.rm=TRUE),
+        median_fibrinogen = median(fibrinogen, na.rm=TRUE),
+        iqr_fibrinogen = IQR(fibrinogen,na.rm=TRUE),
+        median_bilirubin = median(nearest_bilirubin, na.rm=TRUE),
+        iqr_bilirubin = IQR(nearest_bilirubin,na.rm=TRUE),
+        median_platelets = median(nearest_platelet, na.rm = TRUE),
+        iqr_platelets = IQR(nearest_platelet,na.rm=TRUE),
+        median_hep_dose =
+            median(heparin_infusion_dose_value_units_kg_hr, na.rm=TRUE),
+        iqr_hep_dose = IQR(heparin_infusion_dose_value_units_kg_hr,na.rm=TRUE),
+        median_pump_flow4 = median(pump_flow4, na.rm = TRUE),
+        iqr_pump_flow4 = IQR(pump_flow4, na.rm = TRUE),
+        median_pump_flow24 = median(pump_flow24, na.rm = TRUE),
+        iqr_pump_flow24 = IQR(pump_flow24, na.rm = TRUE),
         .groups = "drop"
     ) %>% 
   # dropping subject who had both high and low aPTT group discordance types
@@ -1265,7 +1314,7 @@ vars_to_test <- c(
     "heparin_assay_quantitative",
     "international_normalization_ratio",
     "fibrinogen", "nearest_bilirubin", "nearest_platelet",
-    "heparin_infusion_dose_value_units_kg_hr"
+    "heparin_infusion_dose_value_units_kg_hr", "pump_flow4", "pump_flow24"
 )
 
 kw_results <- lapply(vars_to_test, function(v) {
@@ -1397,13 +1446,244 @@ bind_rows(cat_tables) %>%
   )
 ```
 
+```{r, echo = FALSE}
+###############################################################################
+# Overall (full cohort) categorical summaries INCLUDING the "both types" patient
+# - Builds a separate patient_level_data_overall with "both types" retained
+###############################################################################
 
+# 1) Patient-level discordance grouping (keep "both types")
+patient_discord_groups_overall <- model_fit_data %>%
+  mutate(unusual_type = as.character(unusual_type)) %>%
+  group_by(mrn) %>%
+  summarise(
+    ever_high = any(unusual_type == "aPTT > antiXa"),
+    ever_low  = any(unusual_type == "aPTT < antiXa"),
+    ever_disc = ever_high | ever_low,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    discord_group = case_when(
+      !ever_disc            ~ "never discordant",
+      ever_high & !ever_low ~ "aPTT > antiXa",
+      ever_low  & !ever_high~ "aPTT < antiXa",
+      ever_high & ever_low  ~ "both types"
+    )
+  ) %>%
+  drop_na(discord_group)
 
-# Patient-level Demographics, based on FIRST DISCORDANCE TYPE ONLY - descriptive only for consideration in survival analyses (which are based on first discordance type), not planning to report
+# 2) Merge onto your already-created patient_demographics (one row per patient)
+#    (patient_demographics should already exist from your current code)
+patient_level_data_overall <- patient_demographics %>%
+  left_join(patient_discord_groups_overall, by = "mrn") %>%
+  drop_na(discord_group)
+
+# 3) Overall discordance-group distribution (optional but useful)
+patient_level_data_overall %>%
+  count(discord_group) %>%
+  mutate(
+    pct = 100 * n / sum(n),
+    label = sprintf("%d (%.1f%%)", n, pct)
+  ) %>%
+  select(discord_group, label) %>%
+  knitr::kable(caption = "Overall Cohort: Discordance Group Distribution (includes both types)")
+
+# 4) Overall summary for categorical variables (n, %), ignoring discord_group
+categorical_vars <- c("sex", "department_name", "mode", "support_type", "covid19")
+
+overall_cat_tables <- lapply(categorical_vars, function(v) {
+  patient_level_data_overall %>%
+    count(!!rlang::sym(v)) %>%
+    mutate(
+      pct = 100 * n / sum(n),
+      label = sprintf("%d (%.1f%%)", n, pct),
+      variable_name = v
+    ) %>%
+    select(variable_name, level = !!rlang::sym(v), label)
+})
+
+bind_rows(overall_cat_tables) %>%
+  knitr::kable(caption = "Overall Cohort: Categorical Variables (n, %) (includes both types)")
+
+test_group_counts <- chisq.test(c(77,17,18))
+
+test_group_counts $statistic   # Chi-square value
+test_group_counts $p.value     # p-value
+test_group_counts $expected    # Expected counts
+```
+
+```{r posthoc_location_within_group_pairs, echo=FALSE, warning=FALSE}
+###############################################################################
+# Pairwise comparisons WITHIN each location (CTICU, CCU, MICU, Other)
+# Each p-value is from a 2x2 Fisher's exact test:
+#   rows = the 2 discordance groups being compared
+#   cols = in this location vs not in this location
+###############################################################################
+
+library(dplyr)
+library(purrr)
+library(knitr)
+library(tibble)
+
+# 1. Build analysis data
+df <- patient_level_data %>%
+  mutate(
+    location_group = case_when(
+      department_name %in% c("MIL 5 CTICU", "GBG 4 W CT ICU") ~ "CTICU",
+      department_name %in% c("MIL 5 CCU", "HRT CARDIAC CARE") ~ "CCU",
+      department_name %in% c("MIL 4 MICU A") ~ "MICU",
+      TRUE ~ "Other"
+    ),
+  ) %>%
+  filter(discord_group %in% c("never discordant", "aPTT > antiXa", "aPTT < antiXa"))
+
+# 2. Function to calculate one Fisher p-value
+calc_p <- function(data, location, g1, g2) {
+  
+  sub <- data %>%
+    filter(discord_group %in% c(g1, g2))
+  
+  # Build explicit 2 x 2 table
+  mat <- matrix(
+    c(
+      sum(sub$discord_group == g1 & sub$location_group == location, na.rm = TRUE),
+      sum(sub$discord_group == g1 & sub$location_group != location, na.rm = TRUE),
+      sum(sub$discord_group == g2 & sub$location_group == location, na.rm = TRUE),
+      sum(sub$discord_group == g2 & sub$location_group != location, na.rm = TRUE)
+    ),
+    nrow = 2,
+    byrow = TRUE,
+    dimnames = list(
+      c(g1, g2),
+      c("in_location", "not_in_location")
+    )
+  )
+  
+  # If a row or column totals 0, Fisher is not estimable
+  if (any(rowSums(mat) == 0) || any(colSums(mat) == 0)) {
+    return(NA_real_)
+  }
+  
+  fisher.test(mat)$p.value
+}
+
+# 3. Build results table matching your desired layout
+results <- tibble(
+  Location = c("CTICU", "CCU", "MICU", "Other"),
+  `aPTT > antiXa vs aPTT < antiXa` = c(
+    calc_p(df, "CTICU", "aPTT > antiXa", "aPTT < antiXa"),
+    calc_p(df, "CCU",   "aPTT > antiXa", "aPTT < antiXa"),
+    calc_p(df, "MICU",  "aPTT > antiXa", "aPTT < antiXa"),
+    calc_p(df, "Other", "aPTT > antiXa", "aPTT < antiXa")
+  ),
+  `never discordant vs aPTT < antiXa` = c(
+    calc_p(df, "CTICU", "never discordant", "aPTT < antiXa"),
+    calc_p(df, "CCU",   "never discordant", "aPTT < antiXa"),
+    calc_p(df, "MICU",  "never discordant", "aPTT < antiXa"),
+    calc_p(df, "Other", "never discordant", "aPTT < antiXa")
+  ),
+  `never discordant vs aPTT > antiXa` = c(
+    calc_p(df, "CTICU", "never discordant", "aPTT > antiXa"),
+    calc_p(df, "CCU",   "never discordant", "aPTT > antiXa"),
+    calc_p(df, "MICU",  "never discordant", "aPTT > antiXa"),
+    calc_p(df, "Other", "never discordant", "aPTT > antiXa")
+  )
+)
+
+results %>%
+  mutate(
+    across(
+      -Location,
+      ~ ifelse(is.na(.x), "NA", sprintf("%.4f", .x))
+    )
+  ) %>%
+  kable(caption = "Post hoc pairwise Fisher's exact tests within each location")
+```
+```{r posthoc_between_ICU_discordance, echo=FALSE, warning=FALSE}
+###############################################################################
+# Pairwise comparison of ICUs:
+# Does discordance distribution differ between ICUs?
+###############################################################################
+
+# 1. Define ICU groups
+df <- patient_level_data %>%
+  mutate(
+    location_group = case_when(
+      department_name %in% c("MIL 5 CTICU", "GBG 4 W CT ICU") ~ "CTICU",
+      department_name %in% c("MIL 5 CCU", "HRT CARDIAC CARE") ~ "CCU",
+      department_name %in% c("MIL 4 MICU A") ~ "MICU",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(discord_group %in% c("never discordant", "aPTT > antiXa", "aPTT < antiXa"))
+
+# 2. ICU pairs
+icu_pairs <- combn(unique(df$location_group), 2, simplify = FALSE)
+
+# 3. Run Fisher tests (2 x 3 tables)
+icu_pairwise_results <- map_dfr(icu_pairs, function(pair) {
+  
+  sub <- df %>%
+    filter(location_group %in% pair)
+  
+  tbl <- table(sub$location_group, sub$discord_group)
+  
+  # skip degenerate tables
+  if (nrow(tbl) < 2 || ncol(tbl) < 2) {
+    return(tibble(
+      ICU1 = pair[1],
+      ICU2 = pair[2],
+      p_value = NA_real_
+    ))
+  }
+  
+  test <- fisher.test(tbl)
+  
+  tibble(
+    ICU1 = pair[1],
+    ICU2 = pair[2],
+    p_value = test$p.value
+  )
+}) %>%
+  mutate(
+    p_holm = p.adjust(p_value, method = "holm"),
+    p_fdr  = p.adjust(p_value, method = "fdr")
+  ) %>%
+  arrange(p_holm)
+
+icu_pairwise_results %>%
+  mutate(across(starts_with("p"), ~sprintf("%.4f", .))) %>%
+  kable(caption = "Pairwise comparisons of discordance distribution between ICUs (Fisher's exact test)")
+
+# 4. Optional: show raw tables for sanity check
+icu_pairwise_tables <- map_dfr(icu_pairs, function(pair) {
+  
+  df %>%
+    filter(location_group %in% pair) %>%
+    count(location_group, discord_group) %>%
+    tidyr::pivot_wider(
+      names_from = discord_group,
+      values_from = n,
+      values_fill = 0
+    ) %>%
+    mutate(comparison = paste(pair, collapse = " vs ")) %>%
+    relocate(comparison)
+})
+
+icu_pairwise_tables %>%
+  kable(caption = "Raw counts used for each ICU pair comparison")
+```
+
+_ECMO Device Characteristics_
+```{r, echo = FALSE}
+patient_demographics %>% select(mrn, membrane_lung:temperature_regulation) %>% pivot_longer(membrane_lung:temperature_regulation, names_to = "feature", values_to = "device_name") %>% group_by(feature, device_name) %>% count() %>% kable(caption = "counts of ECMO device apparatus")
+```
+
+# Patient-level Demographics, based on first discordance type only - not reporting this section
 
 **Note that the one patient with both discordance groups is included in this analysis had a FIRST discordance type was "aPTT < antiXa". This patient is dropped for between-group comparison.**
 
-```{r patient-level first discordance, echo = FALSE}
+```{r patient-level first discordance, include = FALSE, echo = FALSE}
 patient_type <- model_fit_data %>%
   arrange(mrn, lab_result_time) %>%
   group_by(mrn) %>%
@@ -1742,7 +2022,29 @@ kable(
 )
 ```
 
-```{r}
+```{r, echo = FALSE}
+overall_counts <- patient_level_complications %>%
+  summarise(
+    n_patients = n_distinct(mrn),
+    hemorrhage_any_n = sum(hemorrhage_any, na.rm = TRUE),
+    thrombosis_any_n = sum(thrombosis_any, na.rm = TRUE),
+    either_heme_or_throm_n = sum((hemorrhage_any | thrombosis_any), na.rm = TRUE),
+    both_heme_and_throm_n = sum((hemorrhage_any & thrombosis_any), na.rm = TRUE)
+  )
+
+kable(overall_counts, caption = "Overall Discrete Patient Counts (Any Hemorrhage / Any Thrombosis)")
+
+overall_subtypes <- patient_level_complications %>%
+  summarise(
+    across(all_of(comp_flags), ~ sum(.x, na.rm = TRUE))
+  ) %>%
+  pivot_longer(everything(), names_to = "complication", values_to = "n_patients") %>%
+  arrange(complication)
+
+kable(overall_subtypes, caption = "Overall Discrete Patient Counts by Complication Flag")
+```
+
+```{r, include = FALSE}
 patient_model_data <- patient_level_complications %>%
   left_join(patient_demographics, by = "mrn") %>% 
   filter(discord_group != "both types") %>% 
@@ -1765,13 +2067,142 @@ patient_model_data <- patient_level_complications %>%
   filter(icu_type != "other")
 ```
 
-# 1. patient-level analyses
+```{r, echo=FALSE}
+###############################################################################
+# OVERALL (FULL COHORT) COMPLICATION COUNTS — INCLUDE "BOTH TYPES" PATIENT
+# - does NOT rely on patient_discord_groups (which filters out "both types")
+# - counts are discrete patients (MRNs)
+###############################################################################
+
+# 0) Define hemorrhage and thrombosis variables (same as your subtype table)
+hemorrhage_vars <- c(
+  "neurologic_intra_extra_parenchymal_cns_hemorrhage_us_or_ct_or_mri",
+  "hemorrhagic_gi_hemorrhage",
+  "major_bleeding_perfusion",
+  "hemorrhagic_peripheral_cannulation_site_bleeding",
+  "pulmonary_pulmonary_hemorrhage",
+  "hemorrhagic_surgical_site_bleeding",
+  "hemorrhagic_mediastinal_cannulation_site_bleeding",
+  "gi_bleeding_present_on_cta_and_confirmed_via_endoscopy",
+  "ich_based_on_imaging_findings"
+)
+
+thrombosis_vars <- c(
+  "neurologic_cns_infarction_us_or_ct_or_mri",
+  "limb_ischemia",
+  "mechanical_thrombosis_clots_circuit_component",
+  "circuit_thrombosis_perfusion",
+  "dvt_pe_1_time_and_date",
+  "ischemic_stroke_1_time_and_date",
+  "acute_limb_ischemia_1_time_and_date"
+)
+
+# 1) Patient-level complications (1 row per MRN)
+patient_complications_overall <- model_fit_complications %>%
+  group_by(mrn) %>%
+  summarise(
+    hemorrhage_any = any(if_any(all_of(hemorrhage_vars), ~ !is.na(.x))),
+    thrombosis_any = any(if_any(all_of(thrombosis_vars), ~ !is.na(.x))),
+    .groups = "drop"
+  )
+
+# 2) Define the "overall cohort" denominator
+#    Option A (recommended): use your patient_demographics roster (1 row per MRN)
+#    This ensures the denominator matches the cohort you summarize elsewhere.
+overall_roster <- patient_demographics %>% distinct(mrn)
+
+#    Option B: if you *don’t* want patient_demographics as the denominator, use:
+# overall_roster <- model_fit_data %>% distinct(mrn)
+
+# 3) Join roster to complications and count discrete patients
+overall_complication_counts <- overall_roster %>%
+  left_join(patient_complications_overall, by = "mrn") %>%
+  mutate(
+    hemorrhage_any = dplyr::coalesce(hemorrhage_any, FALSE),
+    thrombosis_any = dplyr::coalesce(thrombosis_any, FALSE)
+  ) %>%
+  summarise(
+    n_patients = n_distinct(mrn),
+    hemorrhage_any_n = sum(hemorrhage_any),
+    thrombosis_any_n = sum(thrombosis_any),
+    either_heme_or_throm_n = sum(hemorrhage_any | thrombosis_any),
+    both_heme_and_throm_n = sum(hemorrhage_any & thrombosis_any)
+  )
+
+knitr::kable(
+  overall_complication_counts,
+  caption = "Overall discrete patient complication counts (includes 'both types' patient)"
+)
+```
+```{r, echo = FALSE}
+###############################################################################
+# HEMORRHAGE — overall 3x2 Fisher test
+###############################################################################
+
+heme_mat <- matrix(
+  c(3,74,
+    4,13,
+    1,17),
+  nrow = 3,
+  byrow = TRUE
+)
+
+rownames(heme_mat) <- c("Concordant", "aPTT > antiXa", "aPTT < antiXa")
+colnames(heme_mat) <- c("Hemorrhage", "No Hemorrhage")
+
+heme_mat
+
+# Overall test (Fisher preferred due to small cells)
+fisher.test(heme_mat)
+```
+```{r, echo = TRUE}
+###############################################################################
+# Pairwise Fisher tests
+###############################################################################
+
+# Concordant vs aPTT > antiXa
+fisher.test(heme_mat[c(1,2), ])
+
+# Concordant vs aPTT < antiXa
+fisher.test(heme_mat[c(1,3), ])
+
+# aPTT > antiXa vs aPTT < antiXa
+fisher.test(heme_mat[c(2,3), ])
+```
+
+```{r}
+###############################################################################
+# THROMBOSIS — overall 3x2 test
+###############################################################################
+
+throm_mat <- matrix(
+  c(34,43,
+    6,11,
+    4,14),
+  nrow = 3,
+  byrow = TRUE
+)
+
+rownames(throm_mat) <- c("Concordant", "aPTT > antiXa", "aPTT < antiXa")
+colnames(throm_mat) <- c("Thrombosis", "No Thrombosis")
+
+throm_mat
+
+# Chi-square acceptable here (expected counts OK)
+chisq.test(throm_mat)
+
+# (Optional) Fisher for confirmation
+fisher.test(throm_mat)
+```
+
+
+# 1. patient-level logistic regression analyses - not reporting this section
 
 **Fibrinogen only measured in 38 patients, thus cannot be included as a covariable**
 
-**Note that this does not preserve time-matching of labs, which is problematic, and is based **
+**Note that this does not preserve time-matching of labs, which is problematic**
 
-```{r}
+```{r, include = FALSE, echo = FALSE}
 hemorrhage_patient_glm <- glm(
   hemorrhage_any ~ discord_group,
   data = patient_model_data,
@@ -2001,7 +2432,7 @@ knitr::kable(discord_after_window,
              caption = "Patients whose first discordance occurs AFTER the 7-day window")
 ```
 
-## 2.3 Static KM curves (discordance as fixed at first discordance)
+## 2.3 Static KM curves (discordance as fixed at first discordance) - not reporting this section as need time-varying curves
 ```{r survival_static_km, echo = FALSE, warning = FALSE}
 patient_static <- surv_base %>%
   mutate(
@@ -2080,7 +2511,7 @@ ggsurvplot(
 
 ## 2.4 Time-varying exposure: everyone starts concordant, then switches at first discordance
 
-```{r survival_tv_build, echo = TRUE, warning = FALSE}
+```{r survival_tv_build, echo = FALSE, warning = FALSE}
 ###############################################################################
 # Build time-varying data:
 #  - Time scale: days since ECMO cannulation (time_on)
@@ -2222,8 +2653,8 @@ tv_bleeding %>%
   knitr::kable(caption = "Time-varying bleeding data: group membership at time 0")
 ```
 
-## 2.5 KM curves with time-varying discordance
-```{r survival_tv_km, echo = TRUE, warning = FALSE}
+## 2.5 KM curves with time-varying discordance - not reporting this section as need custom risk tables
+```{r survival_tv_km, echo = FALSE, warning = FALSE}
 # --- Thrombosis (time-varying discordance) ---
 fit_throm_tv <- survfit(
   Surv(start, stop, event) ~ discord_group,
@@ -2290,9 +2721,8 @@ OR it uses a subject-level “current stratum at t” routine that’s not robus
 
 The giveaway is that the “discordant-at-0” counts are smaller than the ever-discordant counts (8/10 vs 16/19). That screams: “some early-switchers are being classified as discordant at t=0 by the risk-set routine.”
 
-## The fix:
 ## 2.5.1 - time varying KM plots w custom risk tables which accurately capture number at risk
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 ###############################################################################
 # Time-varying KM + CUSTOM (correct) risk table as ONE combined figure (HTML)
 # - Computes risk counts from start/stop data: start <= t < stop, distinct MRN
@@ -2442,8 +2872,8 @@ make_tv_km_with_custom_risktable(
 )
 ```
 
-
 ## 2.6 Time-varying Cox models with labs captured at the moment discordance is defined
+## PRIMARY RESULTS
 
 Here we:
 
@@ -2451,7 +2881,7 @@ Here we:
     - if discordant: first_discord_time
     - else (always concordant): first paired aPTT/anti-Xa lab_result_time
 
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 ###############################################################################
 # 1. Index time per patient:
 #    - if discordant: first_discord_time
@@ -2562,7 +2992,7 @@ covar_indexed_long %>%
   knitr::kable(digits = 2, caption = "Time distance (hours) between index time and covariate values used for Cox adjustment")
 ```
 
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 ###############################################################################
 # Audit: MRNs where nearest covariate is far from index_time
 ###############################################################################
@@ -2812,10 +3242,9 @@ Notes:
 **Limitations include few hemorrhage events. Thus, risk of type 1 error when interpreting individual terms. Hazard ratios are imprecise**
 
 # REGRESSION DIAGNOSTICS
-*** working ***
 
 ## Proportional Hazards Assumption
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 ph_test_univariable_thromb <- cox.zph(cox_thrombosis_univariable)
 ph_test_univariable_bleed <- cox.zph(cox_bleed_univariable)
 
@@ -2883,7 +3312,7 @@ vif(cox_bleed_nocluster)
 **VIF ≈ 1–2 → no concern**
 
 ## Influence / outliers (DFBETA)
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 # thrombosis
 dfb <- residuals(cox_thromb_indexed, type = "dfbeta")
 
@@ -2910,7 +3339,7 @@ Interpretation
 |DFBETA| > ~0.5 suggests influential individuals
 
 ## Martingale residuals
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 # thrombosis
 mart <- residuals(cox_thromb_indexed, type = "martingale")
 
@@ -2967,7 +3396,7 @@ lines(tv_bleeding_indexed$heparin_infusion_dose_value_units_kg_hr, fitted(loess_
 ```
 
 ## Event per variable (EPV) / model stability
-```{r}
+```{r, echo = FALSE, warning = FALSE}
 # thrombosis
 n_events <- sum(tv_thrombosis_indexed$event)
 n_vars   <- length(coef(cox_thromb_indexed))
@@ -2983,7 +3412,357 @@ n_events / n_vars
 
 **Limitation: we have relatively few bleeding events. Thus hazard ratios are imprecise and should be interpreted cautiously.**
 
-# 4. Tertiary outcomes, i.e. those which may not be solely thrombotic or hemorrhagic, but might be associated with discordance - for publication
+# SENSITIVITY ANALYSIS EXCLUDING PATIENT WITH BOTH TYPES OF DISCORDANCE
+
+```{r, echo = FALSE, warning = FALSE}
+###############################################################################
+# Sensitivity analysis: exclude one patient with both discordance types
+###############################################################################
+EXCLUDE_MRN <- "1001491594"
+
+model_fit_data_sens <- model_fit_data %>%
+  mutate(mrn = as.character(mrn)) %>%
+  filter(mrn != EXCLUDE_MRN)
+
+surv_base_sens <- surv_base %>%
+  mutate(mrn = as.character(mrn)) %>%
+  filter(mrn != EXCLUDE_MRN)
+
+model_fit_complications_sens <- model_fit_complications %>%
+  mutate(mrn = as.character(mrn)) %>%
+  filter(mrn != EXCLUDE_MRN)
+
+tv_thrombosis_sens <- tv_thrombosis %>%
+  mutate(mrn = as.character(mrn)) %>%
+  filter(mrn != EXCLUDE_MRN)
+
+tv_bleeding_sens <- tv_bleeding %>%
+  mutate(mrn = as.character(mrn)) %>%
+  filter(mrn != EXCLUDE_MRN)
+
+###############################################################################
+# 1. Index time per patient
+###############################################################################
+first_paired_coag_time <- model_fit_data_sens %>%
+  group_by(mrn) %>%
+  summarise(first_paired_time = min(lab_result_time, na.rm = TRUE), .groups = "drop") %>%
+  mutate(first_paired_time = lubridate::force_tz(first_paired_time, "UTC"))
+
+index_times <- surv_base_sens %>%
+  left_join(first_paired_coag_time, by = "mrn") %>%
+  transmute(
+    mrn,
+    index_time = dplyr::coalesce(first_discord_time, first_paired_time)
+  )
+
+###############################################################################
+# 2. Long covariate table using covariate-specific timestamps
+###############################################################################
+covar_long <- model_fit_complications_sens %>%
+  select(
+    mrn,
+    lab_result_time,
+    weight,
+    nearest_inr, inr_time,
+    nearest_bilirubin, bilirubin_time,
+    nearest_platelet, platelet_time,
+    heparin_infusion_dose_value_units_kg_hr
+  ) %>%
+  mutate(dose_time = lab_result_time) %>%
+  tidyr::pivot_longer(
+    cols = c(nearest_inr, nearest_bilirubin, nearest_platelet, heparin_infusion_dose_value_units_kg_hr),
+    names_to = "covariate",
+    values_to = "value"
+  ) %>%
+  mutate(
+    cov_time = dplyr::case_when(
+      covariate == "nearest_inr" ~ inr_time,
+      covariate == "nearest_bilirubin" ~ bilirubin_time,
+      covariate == "nearest_platelet" ~ platelet_time,
+      covariate == "heparin_infusion_dose_value_units_kg_hr" ~ dose_time,
+      TRUE ~ as.POSIXct(NA)
+    )
+  ) %>%
+  select(mrn, covariate, value, cov_time, weight) %>%
+  filter(!is.na(value), !is.na(cov_time)) %>%
+  distinct()
+
+###############################################################################
+# 3. For each patient x covariate, select nearest value to index_time (<=24h)
+###############################################################################
+covar_indexed_long <- covar_long %>%
+  inner_join(index_times, by = "mrn") %>%
+  mutate(time_diff_hours = abs(as.numeric(difftime(cov_time, index_time, units = "hours")))) %>%
+  filter(time_diff_hours <= 24) %>%
+  group_by(mrn, covariate) %>%
+  slice_min(time_diff_hours, with_ties = FALSE) %>%
+  ungroup()
+
+###############################################################################
+# 4. Wide covariate snapshot for Cox adjustment
+###############################################################################
+covar_snapshot <- covar_indexed_long %>%
+  select(mrn, covariate, value) %>%
+  tidyr::pivot_wider(names_from = covariate, values_from = value) %>%
+  left_join(
+    covar_long %>% group_by(mrn) %>% summarise(weight = first(weight), .groups = "drop"),
+    by = "mrn"
+  )
+
+cox_covars_indexed <- covar_snapshot %>%
+  select(
+    mrn,
+    nearest_inr,
+    nearest_bilirubin,
+    nearest_platelet,
+    heparin_infusion_dose_value_units_kg_hr,
+    weight
+  )
+
+###############################################################################
+# 5. Quick summary: matching distance
+###############################################################################
+covar_indexed_long %>%
+  mutate(
+    covariate = dplyr::recode(
+      covariate,
+      nearest_inr = "INR",
+      nearest_bilirubin = "Bilirubin",
+      nearest_platelet = "Platelet",
+      heparin_infusion_dose_value_units_kg_hr = "Heparin dose"
+    )
+  ) %>%
+  group_by(covariate) %>%
+  summarise(
+    n_patients = n_distinct(mrn),
+    median_time_h = median(time_diff_hours, na.rm = TRUE),
+    p95_time_h = quantile(time_diff_hours, 0.95, na.rm = TRUE),
+    max_time_h = max(time_diff_hours, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(digits = 2, caption = "Sensitivity: time distance (hours) between index time and covariate values used for Cox adjustment")
+
+###############################################################################
+# Audit: MRNs where nearest covariate is far from index_time
+###############################################################################
+mrns_over_48h <- covar_long %>%
+  inner_join(index_times, by = "mrn") %>%
+  mutate(time_diff_hours = abs(as.numeric(difftime(cov_time, index_time, units = "hours")))) %>%
+  group_by(mrn, covariate) %>%
+  slice_min(time_diff_hours, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(time_diff_hours > 48) %>%
+  mutate(
+    covariate = dplyr::recode(
+      covariate,
+      nearest_inr = "INR",
+      nearest_bilirubin = "Bilirubin",
+      nearest_platelet = "Platelet",
+      heparin_infusion_dose_value_units_kg_hr = "Heparin dose"
+    )
+  ) %>%
+  arrange(desc(time_diff_hours))
+
+mrns_over_48h %>%
+  select(mrn, covariate, time_diff_hours) %>%
+  tidyr::pivot_wider(names_from = covariate, values_from = time_diff_hours) %>%
+  knitr::kable(digits = 2, caption = "Sensitivity: patients with covariate time gap > 48h (nearest per covariate to index_time)")
+
+###############################################################################
+# Merge indexed covariates into time-varying datasets
+###############################################################################
+tv_thrombosis_indexed <- tv_thrombosis_sens %>%
+  left_join(cox_covars_indexed, by = "mrn") %>%
+  filter(
+    !is.na(nearest_inr),
+    !is.na(nearest_bilirubin),
+    !is.na(nearest_platelet),
+    !is.na(heparin_infusion_dose_value_units_kg_hr),
+    !is.na(weight)
+  )
+
+tv_bleeding_indexed <- tv_bleeding_sens %>%
+  left_join(cox_covars_indexed, by = "mrn") %>%
+  filter(
+    !is.na(nearest_inr),
+    !is.na(nearest_bilirubin),
+    !is.na(nearest_platelet),
+    !is.na(heparin_infusion_dose_value_units_kg_hr),
+    !is.na(weight)
+  )
+
+tv_thrombosis_indexed %>%
+  count(discord_group) %>%
+  knitr::kable(caption = "Sensitivity: thrombosis TV data intervals by discordance group (with indexed labs)")
+
+tv_bleeding_indexed %>%
+  count(discord_group) %>%
+  knitr::kable(caption = "Sensitivity: bleeding TV data intervals by discordance group (with indexed labs)")
+
+term_patient_n <- function(df, covars, exposure_term = "discord_group") {
+  n_total <- df %>% distinct(mrn) %>% nrow()
+
+  out_exposure <- tibble(
+    term = exposure_term,
+    n_patients = n_total,
+    n_total = n_total
+  )
+
+  out_covars <- purrr::map_dfr(covars, function(v) {
+    tibble(
+      term = v,
+      n_patients = df %>% filter(!is.na(.data[[v]])) %>% distinct(mrn) %>% nrow(),
+      n_total = n_total
+    )
+  })
+
+  bind_rows(out_exposure, out_covars)
+}
+
+###############################################################################
+# Time-varying Cox models
+###############################################################################
+cox_thrombosis_univariable <- survival::coxph(
+  survival::Surv(start, stop, event) ~ discord_group + cluster(mrn),
+  data = tv_thrombosis_indexed,
+  na.action = na.exclude
+)
+
+cox_thrombosis_univariable %>%
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(HR = estimate, .keep = "unused") %>%
+  mutate(
+    p_fdr  = p.adjust(p.value, method = "fdr"),
+    p_holm = p.adjust(p.value, method = "holm"),
+    p_bonf = p.adjust(p.value, method = "bonferroni")
+  ) %>%
+  knitr::kable(caption = "Sensitivity: time-varying Cox (thrombosis), univariable")
+
+cox_thromb_indexed <- survival::coxph(
+  survival::Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_bilirubin +
+    nearest_platelet +
+    heparin_infusion_dose_value_units_kg_hr +
+    weight +
+    cluster(mrn),
+  data = tv_thrombosis_indexed,
+  na.action = na.exclude
+)
+
+cox_thrombosis_simple <- survival::coxph(
+  survival::Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_platelet +
+    cluster(mrn),
+  data = tv_thrombosis_indexed,
+  na.action = na.exclude
+)
+
+covars <- c(
+  "nearest_inr",
+  "nearest_bilirubin",
+  "nearest_platelet",
+  "heparin_infusion_dose_value_units_kg_hr",
+  "weight"
+)
+
+n_thromb_terms <- term_patient_n(tv_thrombosis_indexed, covars)
+
+thromb_indexed_results <- broom::tidy(cox_thromb_indexed, exponentiate = TRUE, conf.int = TRUE) %>%
+  left_join(n_thromb_terms, by = "term") %>%
+  mutate(
+    n_patients = dplyr::coalesce(n_patients, n_total),
+    n_display  = paste0(n_patients, " / ", n_total),
+    HR = estimate
+  ) %>%
+  relocate(n_display, .after = term) %>%
+  mutate(
+    p_fdr  = p.adjust(p.value, method = "fdr"),
+    p_holm = p.adjust(p.value, method = "holm"),
+    p_bonf = p.adjust(p.value, method = "bonferroni")
+  )
+
+thromb_indexed_results %>%
+  knitr::kable(digits = 3, caption = "Sensitivity: time-varying Cox (thrombosis) with indexed covariates; N per term (n / total)")
+
+cox_bleed_univariable <- survival::coxph(
+  survival::Surv(start, stop, event) ~ discord_group + cluster(mrn),
+  data = tv_bleeding_indexed,
+  na.action = na.exclude
+)
+
+cox_bleed_univariable %>%
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(HR = estimate, .keep = "unused") %>%
+  mutate(
+    p_fdr  = p.adjust(p.value, method = "fdr"),
+    p_holm = p.adjust(p.value, method = "holm"),
+    p_bonf = p.adjust(p.value, method = "bonferroni")
+  ) %>%
+  knitr::kable(caption = "Sensitivity: time-varying Cox (bleeding), univariable")
+
+cox_bleed_indexed <- survival::coxph(
+  survival::Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_bilirubin +
+    nearest_platelet +
+    heparin_infusion_dose_value_units_kg_hr +
+    weight +
+    cluster(mrn),
+  data = tv_bleeding_indexed,
+  na.action = na.exclude
+)
+
+cox_bleed_simple <- survival::coxph(
+  survival::Surv(start, stop, event) ~
+    discord_group +
+    nearest_inr +
+    nearest_platelet +
+    cluster(mrn),
+  data = tv_bleeding_indexed,
+  na.action = na.exclude
+)
+
+n_bleed_terms <- term_patient_n(tv_bleeding_indexed, covars)
+
+bleed_indexed_results <- broom::tidy(cox_bleed_indexed, exponentiate = TRUE, conf.int = TRUE) %>%
+  left_join(n_bleed_terms, by = "term") %>%
+  mutate(
+    n_patients = dplyr::coalesce(n_patients, n_total),
+    n_display  = paste0(n_patients, " / ", n_total),
+    HR = estimate
+  ) %>%
+  relocate(n_display, .after = term) %>%
+  mutate(
+    p_fdr  = p.adjust(p.value, method = "fdr"),
+    p_holm = p.adjust(p.value, method = "holm"),
+    p_bonf = p.adjust(p.value, method = "bonferroni")
+  )
+
+bleed_indexed_results %>%
+  knitr::kable(digits = 3, caption = "Sensitivity: time-varying Cox (bleeding) with indexed covariates; N per term (n / total)")
+
+cox_bleed_simple %>%
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  left_join(n_bleed_terms, by = "term") %>%
+  mutate(
+    n_patients = dplyr::coalesce(n_patients, n_total),
+    n_display  = paste0(n_patients, " / ", n_total),
+    HR = estimate
+  ) %>%
+  relocate(n_display, .after = term) %>%
+  mutate(
+    p_fdr  = p.adjust(p.value, method = "fdr"),
+    p_holm = p.adjust(p.value, method = "holm"),
+    p_bonf = p.adjust(p.value, method = "bonferroni")
+  )
+```
+
+# 4. Tertiary outcomes, i.e. those which may not be solely thrombotic or hemorrhagic, but might be associated with discordance - not reporting, consider for future exploration
 
 * `death_date`
 
@@ -3538,21 +4317,275 @@ complication_simple %>% broom::tidy()
 
 Standard logistic regression had high separation based on discordance type, likely due to uncommon outcome among a relatively small sample size with several critical covariables. Thus, Firth penalized logistic regression used to compute odds ratios and p-values.
 
+
+# FIGURES FOR PUBLICATION
+```{r saving as PNG, echo = FALSE}
+# Force category order and labels to match KM figures
+model_fit_data <- model_fit_data %>%
+  mutate(
+    unusual_type = as.character(unusual_type),
+    unusual_type = case_when(
+      unusual_type == "aPTT > antiXa" ~ "aPTT > anti-Xa",
+      unusual_type == "aPTT < antiXa" ~ "aPTT < anti-Xa",
+      TRUE ~ unusual_type
+    ),
+    unusual_type = factor(
+      unusual_type,
+      levels = c("concordant", "aPTT > anti-Xa", "aPTT < anti-Xa")
+    )
+  )
+
+# Plot predictions with prediction intervals and flagged unusual points
+mixed_model_ribbon <- 
+  ggplot() +
+  geom_ribbon(
+    data = new_data,
+    aes(x = activated_partial_thromboplastin_time, ymin = lwr, ymax = upr),
+    fill = "blue",
+    alpha = 0.2
+  ) +
+  geom_line(
+    data = new_data,
+    aes(x = activated_partial_thromboplastin_time, y = fit),
+    color = "blue"
+  ) +
+  geom_point(
+    data = model_fit_data,
+    aes(
+      x = activated_partial_thromboplastin_time,
+      y = heparin_assay_quantitative,
+      color = unusual_type,
+      text = paste("Study ID:", study_id)
+    )
+  ) +
+  scale_color_manual(
+    name = "Discordance Category",
+    values = c(
+      "concordant" = "#F8766D",
+      "aPTT > anti-Xa" = "#7CAE00",
+      "aPTT < anti-Xa" = "#00BFC4"
+    ),
+    labels = c(
+      "concordant" = "Concordant",
+      "aPTT > anti-Xa" = "aPTT > anti-Xa",
+      "aPTT < anti-Xa" = "aPTT < anti-Xa"
+    )
+  ) +
+  labs(
+    title = "Mixed Model Fit with 95% Prediction Interval",
+    x = "Activated partial thromboplastin time, seconds",
+    y = "anti-Xa level, IU/mL"
+  ) +
+  theme_minimal()
+
+# save as PNG
+ggsave(
+  filename = "mixed_model_ribbon.png",
+  plot = mixed_model_ribbon,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r, echo = FALSE, warning = FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(patchwork)
+library(cowplot)
+
+#----------------------------
+# Risk table builder
+#----------------------------
+make_tv_risk_long <- function(tv, times = seq(0, 40, 5),
+                              id = "mrn", strata = "discord_group",
+                              start = "start", stop = "stop") {
+
+  desired_levels <- c("aPTT > anti-Xa", "aPTT < anti-Xa", "concordant")
+
+  tv <- tv %>%
+    mutate(
+      !!strata := as.character(.data[[strata]]),
+      !!strata := case_when(
+        .data[[strata]] == "aPTT > antiXa" ~ "aPTT > anti-Xa",
+        .data[[strata]] == "aPTT < antiXa" ~ "aPTT < anti-Xa",
+        TRUE ~ .data[[strata]]
+      ),
+      !!strata := factor(.data[[strata]], levels = desired_levels)
+    )
+
+  expand_grid(time = times, tmp_group = desired_levels) %>%
+    rowwise() %>%
+    mutate(
+      n_risk = {
+        tv %>%
+          filter(.data[[start]] <= time,
+                 .data[[stop]] > time,
+                 as.character(.data[[strata]]) == tmp_group) %>%
+          distinct(.data[[id]]) %>%
+          nrow()
+      }
+    ) %>%
+    ungroup() %>%
+    transmute(
+      time = as.numeric(time),
+      discord_group = factor(tmp_group, levels = desired_levels),
+      n_risk = n_risk
+    )
+}
+
+#----------------------------
+# Risk table plot
+#----------------------------
+make_risk_table_plot <- function(risk_long, times) {
+
+  ggplot(risk_long, aes(x = time, y = discord_group)) +
+    geom_tile(fill = "white", color = "grey88", linewidth = 0.3, height = 0.9) +
+    geom_text(aes(label = n_risk), size = 3.0) +
+    scale_x_continuous(breaks = times, limits = range(times)) +
+    labs(
+      x = NULL,
+      y = NULL,
+      title = "Number at risk (time varying exposure)"
+    ) +
+    theme_bw(base_size = 9) +
+    theme(
+      plot.title = element_text(size = 9.5, hjust = 0.5),
+      axis.text.y = element_text(size = 8.5),
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid = element_blank(),
+      legend.position = "none",
+      plot.margin = margin(0, 5, 3, 5)
+    )
+}
+
+#----------------------------
+# KM panel (no legend here)
+#----------------------------
+make_tv_km_panel <- function(tv, event_label, times) {
+
+  desired_levels <- c("concordant", "aPTT > anti-Xa", "aPTT < anti-Xa")
+
+  tv <- tv %>%
+    mutate(discord_group = as.character(discord_group)) %>%
+    mutate(discord_group = case_when(
+      discord_group == "aPTT > antiXa" ~ "aPTT > anti-Xa",
+      discord_group == "aPTT < antiXa" ~ "aPTT < anti-Xa",
+      TRUE ~ discord_group
+    )) %>%
+    mutate(discord_group = factor(discord_group, levels = desired_levels))
+
+  fit_tv <- survfit(Surv(start, stop, event) ~ discord_group, data = tv)
+  names(fit_tv$strata) <- gsub("^discord_group=", "", names(fit_tv$strata))
+
+  g <- ggsurvplot(
+    fit_tv,
+    data = tv,
+    conf.int = FALSE,
+    risk.table = FALSE,
+    break.time.by = diff(times)[1],
+    xlab = "Days since ECMO cannulation",
+    ylab = "Event-free survival probability",
+    title = event_label,
+    legend = "none",
+    size = 1.1,
+    palette = c(
+      "concordant" = "#F8766D",
+      "aPTT > anti-Xa" = "#7CAE00",
+      "aPTT < anti-Xa" = "#00BFC4"
+    )
+  )
+
+  km_plot <- g$plot +
+    scale_x_continuous(breaks = times, limits = range(times)) +
+    theme(plot.title = element_text(hjust = 0.5, size = 12))
+
+  risk_long <- make_tv_risk_long(tv, times = times)
+
+  rt_plot <- make_risk_table_plot(risk_long, times)
+
+  km_plot / rt_plot + plot_layout(heights = c(3.8, 0.9))
+}
+
+#----------------------------
+# Build panels
+#----------------------------
+times <- seq(0, 40, 5)
+
+hemorrhage_panel <- make_tv_km_panel(
+  tv = tv_bleeding,
+  event_label = "Hemorrhage",
+  times = times
+)
+
+thrombosis_panel <- make_tv_km_panel(
+  tv = tv_thrombosis,
+  event_label = "Thrombosis",
+  times = times
+)
+
+#----------------------------
+# Shared legend
+#----------------------------
+legend_plot <- ggplot(
+  data.frame(
+    x = 1,
+    y = 1,
+    group = factor(
+      c("Concordant", "aPTT > anti-Xa", "aPTT < anti-Xa"),
+      levels = c("Concordant", "aPTT > anti-Xa", "aPTT < anti-Xa")
+    )
+  ),
+  aes(x = x, y = y, color = group)
+) +
+  geom_point(size = 3) +
+  scale_color_manual(
+    name = "Discordance Category",
+    values = c(
+      "Concordant" = "#F8766D",
+      "aPTT > anti-Xa" = "#7CAE00",
+      "aPTT < anti-Xa" = "#00BFC4"
+    )
+  ) +
+  theme_void() +
+  theme(legend.position = "right")
+
+legend <- cowplot::get_legend(legend_plot)
+
+#----------------------------
+# Combine
+#----------------------------
+combined_km_figure <-
+  (hemorrhage_panel | thrombosis_panel | legend) +
+  plot_layout(widths = c(1, 1, 0.3))
+
+combined_km_figure
+
+#----------------------------
+# Save
+#----------------------------
+ggsave(
+  filename = "combined_km_figure.png",
+  plot = combined_km_figure,
+  width = 16,
+  height = 7.5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
 # CONCLUSIONS
 - thrombotic and hemorrhagic events are common among ECMO patients
 
-- thrombotic events occurred frequently, despite heparin use in this sample
+- thrombotic events occurred frequently, despite heparin use in this sample (initiation of ECMO induces a hypercoagulable state which is associated with thrombosis development)
 
 - there is moderate correlation between aPTT and antiXa among heparinized ECMO patients
 
 - categorizing discordance based on aPTT range:anti-Xa range may not effectively recognize values which are relatively unusual (to each other) at CUIMC. The counts of patients who are discordant based on classic groupings based on usual CUIMC systemic anticoagulation goals are different (numerically higher) than those with relative comparison via polynomial model used in this approach. Our approach may better recognize truly unusual values.
-
-- initiation of ECMO induces a hypercoagulable state which is associated with thrombosis development
-
-- aPTT < antiXa is associated with increased risk of thrombosis compared to concordant and/or high aPTT > antiXa states (all patients with this state developed thrombosis in our study).
-
-- Likewise, aPTT < antiXa may be associated with a decreased risk of hemorrhage (non-significant)
-
-- underpowered for survival analysis
 
 - the relative aPTT:antiXa value is more important than absolute values. Classifying discordance by range alone (i.e. within wide goal ranges) may not appropriately recognize hyper- or hypocoagulable states.
