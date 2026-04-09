@@ -3241,6 +3241,152 @@ Notes:
 
 **Limitations include few hemorrhage events. Thus, risk of type 1 error when interpreting individual terms. Hazard ratios are imprecise**
 
+```{r survival_followup_and_time_to_event_summary, echo=FALSE, warning=FALSE, message=FALSE}
+
+###############################################################################
+# Helpers
+###############################################################################
+fmt_median_iqr <- function(x, digits = 2) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_character_)
+  q <- quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+  iqr_width <- q[3] - q[1]
+  
+  paste0(
+    round(q[2], digits),
+    " (IQR ",
+    round(iqr_width, digits),
+  ")"
+  )
+}
+
+get_reverse_km_median <- function(time, event) {
+  # event = 1 if outcome occurred, 0 if censored
+  # Reverse KM flips event/censoring to estimate follow-up distribution
+  fit <- survfit(Surv(time, 1 - event) ~ 1)
+
+  tibble(
+    median = unname(summary(fit)$table["median"]),
+    lcl    = unname(summary(fit)$table["0.95LCL"]),
+    ucl    = unname(summary(fit)$table["0.95UCL"])
+  )
+}
+
+###############################################################################
+# Patient-level survival summary derived from surv_base
+###############################################################################
+patient_surv_summary <- surv_base %>%
+  mutate(
+    followup_days = as.numeric(difftime(censor_time, time_on, units = "days")),
+
+    bleed_in_window = !is.na(bleed_first) & bleed_first <= censor_time,
+    clot_in_window  = !is.na(clot_first)  & clot_first  <= censor_time,
+
+    bleed_event = if_else(bleed_in_window, 1L, 0L),
+    clot_event  = if_else(clot_in_window,  1L, 0L),
+
+    time_to_bleed_days = if_else(
+      bleed_event == 1L,
+      as.numeric(difftime(bleed_first, time_on, units = "days")),
+      NA_real_
+    ),
+
+    time_to_clot_days = if_else(
+      clot_event == 1L,
+      as.numeric(difftime(clot_first, time_on, units = "days")),
+      NA_real_
+    ),
+
+    time_from_discord_to_bleed_days = if_else(
+      bleed_event == 1L &
+        !is.na(first_discord_time) &
+        bleed_first >= first_discord_time,
+      as.numeric(difftime(bleed_first, first_discord_time, units = "days")),
+      NA_real_
+    )
+  ) %>%
+  filter(!is.na(followup_days), followup_days >= 0)
+
+###############################################################################
+# Median follow-up
+###############################################################################
+bleed_followup_rkm <- get_reverse_km_median(
+  time  = patient_surv_summary$followup_days,
+  event = patient_surv_summary$bleed_event
+)
+
+clot_followup_rkm <- get_reverse_km_median(
+  time  = patient_surv_summary$followup_days,
+  event = patient_surv_summary$clot_event
+)
+
+followup_summary_tbl <- tibble(
+  metric = c(
+    "Patients in survival cohort",
+    "Observed follow-up, days",
+    "Reverse KM median follow-up for hemorrhage model, days (95% CI)",
+    "Reverse KM median follow-up for thrombosis model, days (95% CI)"
+  ),
+  value = c(
+    nrow(patient_surv_summary),
+    fmt_median_iqr(patient_surv_summary$followup_days),
+    paste0(
+      round(bleed_followup_rkm$median, 2), " (",
+      round(bleed_followup_rkm$lcl, 2), "–",
+      round(bleed_followup_rkm$ucl, 2), ")"
+    ),
+    paste0(
+      round(clot_followup_rkm$median, 2), " (",
+      round(clot_followup_rkm$lcl, 2), "–",
+      round(clot_followup_rkm$ucl, 2), ")"
+    )
+  )
+)
+
+kable(
+  followup_summary_tbl,
+  caption = "Median follow-up summary"
+)
+
+###############################################################################
+# Time-to-event summaries overall and by first discordance type
+###############################################################################
+time_to_event_tbl <- patient_surv_summary %>%
+  group_by(first_discord_type) %>%
+  summarise(
+    n_patients = n(),
+    hemorrhage_events = sum(bleed_event, na.rm = TRUE),
+    thrombosis_events = sum(clot_event, na.rm = TRUE),
+    time_to_hemorrhage_from_ecmo_days = fmt_median_iqr(time_to_bleed_days),
+    time_to_thrombosis_from_ecmo_days = fmt_median_iqr(time_to_clot_days),
+    .groups = "drop"
+  )
+
+kable(
+  time_to_event_tbl,
+  caption = "Time-to-event summaries by first discordance type"
+)
+
+###############################################################################
+# Focused summary: hemorrhage timing by discordance subtype
+###############################################################################
+bleed_discordance_tbl <- patient_surv_summary %>%
+  filter(first_discord_type %in% c("aPTT > antiXa", "aPTT < antiXa")) %>%
+  group_by(first_discord_type) %>%
+  summarise(
+    n_patients = n(),
+    hemorrhage_events = sum(bleed_event, na.rm = TRUE),
+    time_to_hemorrhage_from_ecmo_days = fmt_median_iqr(time_to_bleed_days),
+    time_from_first_discordance_to_hemorrhage_days = fmt_median_iqr(time_from_discord_to_bleed_days),
+    .groups = "drop"
+  )
+
+kable(
+  bleed_discordance_tbl,
+  caption = "Hemorrhage timing among patients by first discordance subtype"
+)
+```
+
 # REGRESSION DIAGNOSTICS
 
 ## Proportional Hazards Assumption
